@@ -10,7 +10,9 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { path, ...rest } = req.query;
+  // Vercel's native catch-all routing (unlike Next.js) keys the segment array
+  // under the literal "...path", dots included — not "path".
+  const { '...path': path, ...rest } = req.query;
   const segments = Array.isArray(path) ? path : [path];
   const tablePath = segments.map(encodeURIComponent).join('/');
 
