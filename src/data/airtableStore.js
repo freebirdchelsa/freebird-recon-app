@@ -16,6 +16,7 @@ import {
   vehicleToFields, fieldsToVehicle,
   lineToFields, fieldsToLine,
   logToFields, fieldsToLog,
+  generalLogToFields, fieldsToGeneralLog,
   estEditToFields, fieldsToEstEdit,
   activityToFields, fieldsToActivity,
 } from './schema.js';
@@ -78,7 +79,20 @@ async function loadAll() {
     if (v) v.lines.push(l);
   });
 
+  // Labor Logs holds two kinds of rows in one table: job-specific (linked to a
+  // Repair Line) and general/non-job (linked straight to a Vehicle, with a Reason).
   logRecs.forEach((rec) => {
+    const isGeneral = !rec.fields['Repair Line'] && rec.fields['Vehicle'];
+    if (isGeneral) {
+      const g = fieldsToGeneralLog(rec);
+      if (!g.id) return;
+      recIds.logs.set(g.id, rec.id);
+      const vehId = vehicleRecIdToAppId.get(g._vehicleRecId);
+      delete g._vehicleRecId;
+      const v = vehId && vehiclesById.get(vehId);
+      if (v) v.generalLogs.push(g);
+      return;
+    }
     const g = fieldsToLog(rec);
     if (!g.id) return;
     recIds.logs.set(g.id, rec.id);
@@ -117,7 +131,10 @@ async function loadAll() {
   }
 
   const vehicles = [...vehiclesById.values()].sort((a, b) => (b.addedTs || 0) - (a.addedTs || 0));
-  vehicles.forEach((v) => v.lines.sort((a, b) => (a.ts || 0) - (b.ts || 0)));
+  vehicles.forEach((v) => {
+    v.lines.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    v.generalLogs.sort((a, b) => (a.start || 0) - (b.start || 0));
+  });
   linesById.forEach((l) => {
     l.laborLogs.sort((a, b) => (a.start || 0) - (b.start || 0));
     l.estEdits.sort((a, b) => (a.ts || 0) - (b.ts || 0));
@@ -189,6 +206,14 @@ async function persistToAirtable(nextData) {
   await syncEntity(
     TABLES.laborLogs, recIds.logs, prevLogs, nextLogs,
     (g) => logToFields(g, recIds.lines.get(g._lineId))
+  );
+
+  // General (non-job) clock-ins — same table, linked straight to the vehicle instead of a line.
+  const prevGeneralLogs = prev.vehicles.flatMap((v) => (v.generalLogs || []).map((g) => ({ ...g, _vehId: v.id })));
+  const nextGeneralLogs = nextData.vehicles.flatMap((v) => (v.generalLogs || []).map((g) => ({ ...g, _vehId: v.id })));
+  await syncEntity(
+    TABLES.laborLogs, recIds.logs, prevGeneralLogs, nextGeneralLogs,
+    (g) => generalLogToFields(g, recIds.vehicles.get(g._vehId))
   );
 
   // Estimate edits are an append-only audit trail — never update or delete them.

@@ -19,7 +19,10 @@ const STAGES = [
   { id: "frontline", label: "Front Line" },
 ];
 
-const TEAM = ["Chelsa", "Jerry", "Oscar", "Mark", "Dan", "Kansas"];
+const TEAM = ["Chelsa", "Jerry", "Mark", "Dan", "Kansas"];
+
+// non-job reasons a tech can clock in under, available from the moment a vehicle is checked in
+const GENERAL_REASONS = ["Inspection", "Parts pricing & ordering", "Detail", "Other"];
 
 const CHECKLIST = [
   {
@@ -28,7 +31,7 @@ const CHECKLIST = [
   },
   {
     section: "Under Hood",
-    items: ["Engine oil level & condition", "Coolant level & condition", "Brake fluid level", "Belts & hoses", "Battery condition & terminals", "No visible leaks"],
+    items: ["Engine oil level & condition", "Coolant level & condition", "Brake fluid level", "Belts & hoses", "Battery condition & terminals", "No visible leaks", "Air filter", "Cabin air filter"],
   },
   {
     section: "Tires & Brakes",
@@ -40,7 +43,7 @@ const CHECKLIST = [
   },
   {
     section: "Interior",
-    items: ["Seats & upholstery", "All power accessories work", "Radio / infotainment", "Horn works", "Seat belts function", "Odor check"],
+    items: ["Seats & upholstery", "All power accessories work", "Radio / infotainment", "Horn works", "Seat belts function"],
   },
   {
     section: "Safety & Compliance",
@@ -73,17 +76,22 @@ const fmtDur = (ms) => {
 const lineMs = (l) => (l.laborLogs || []).reduce((s, g) => s + ((g.end || Date.now()) - g.start), 0);
 const openLog = (l, who) => (l.laborLogs || []).find((g) => !g.end && (!who || g.by === who));
 const DEFAULT_RATE = 100;
-// actual labor $ so far: manual final labor wins, else logged hours × shop rate, else the estimate
-const lineLabor = (l, rate) => {
+// this line's own labor rate — every line sets its own (no shared shop rate)
+const lineRate = (l) => Number(l.estLaborRate) || DEFAULT_RATE;
+// actual labor $ so far: manual final labor wins, else logged hours × this line's rate, else the hours estimate × rate
+const lineLabor = (l) => {
   if (l.actualLabor !== "" && l.actualLabor != null) return Number(l.actualLabor) || 0;
   const ms = lineMs(l);
-  if (ms > 0) return (ms / 3600000) * (Number(rate) || DEFAULT_RATE);
-  return Number(l.estLabor) || 0;
+  const rate = lineRate(l);
+  if (ms > 0) return (ms / 3600000) * rate;
+  return (Number(l.estLaborHours) || 0) * rate;
 };
 const linePartsCost = (l) =>
   (l.partsFinal !== "" && l.partsFinal != null ? Number(l.partsFinal)
   : l.actualParts !== "" && l.actualParts != null ? Number(l.actualParts)
   : Number(l.estParts)) || 0;
+// pre-approval estimate: parts $ + labor hours × this line's rate
+const lineEst = (l) => (Number(l.estParts) || 0) + (Number(l.estLaborHours) || 0) * (Number(l.estLaborRate) || 0);
 
 const emptyData = { vehicles: [], notifications: [] };
 
@@ -342,11 +350,11 @@ function Main() {
           id={view.id}
           me={me}
           onCancel={() => setView({ name: "vehicle", id: view.id })}
-          onSubmit={async (results, lines) => {
+          onSubmit={async (results, lines, generalNotes) => {
             await mutate((d) => {
               const v = d.vehicles.find((x) => x.id === view.id);
               if (!v) return d;
-              v.inspection = { by: me, ts: Date.now(), results };
+              v.inspection = { by: me, ts: Date.now(), results, notes: generalNotes || "" };
               v.lines = [...(v.lines || []), ...lines];
               if (v.stage === "intake" || v.stage === "inspection") v.stage = lines.length ? "approval" : "parts";
               const fails = lines.length;
@@ -483,12 +491,12 @@ function PickUser({ onPick }) {
 
 /* ---------- board ---------- */
 
-function vehicleCost(v, rate) {
+function vehicleCost(v) {
   const lineTotal = (v.lines || []).reduce((s, l) => {
     if (l.status === "declined") return s;
-    return s + linePartsCost(l) + lineLabor(l, rate);
+    return s + linePartsCost(l) + lineLabor(l);
   }, 0);
-  return lineTotal + (v.detailDone ? 150 : 0) + (v.emPassed ? 16.15 : 0) + (v.oilDone ? 79.99 : 0);
+  return lineTotal + (v.detailDone ? 150 : 0) + (v.emPassed ? 16.15 : 0) + (v.oilDone ? (Number(v.oilPrice) || 79.99) : 0);
 }
 
 function Board({ data, onOpen, onAdd }) {
@@ -521,7 +529,7 @@ function Board({ data, onOpen, onAdd }) {
                 <div className="flex-1 h-px bg-slate-200" />
                 <span className="text-[11px] text-slate-400">{list.length}</span>
               </div>
-              {list.map((v) => <VehicleCard key={v.id} v={v} onOpen={onOpen} rate={data?.laborRate} />)}
+              {list.map((v) => <VehicleCard key={v.id} v={v} onOpen={onOpen} />)}
             </div>
           );
         })}
@@ -532,7 +540,7 @@ function Board({ data, onOpen, onAdd }) {
               <span className="text-[11px] font-display font-bold uppercase tracking-widest text-emerald-600">Front Line</span>
               <div className="flex-1 h-px bg-emerald-100" />
             </div>
-            {done.map((v) => <VehicleCard key={v.id} v={v} onOpen={onOpen} done rate={data?.laborRate} />)}
+            {done.map((v) => <VehicleCard key={v.id} v={v} onOpen={onOpen} done />)}
           </div>
         )}
       </div>
@@ -548,10 +556,10 @@ function Board({ data, onOpen, onAdd }) {
   );
 }
 
-function VehicleCard({ v, onOpen, done, rate }) {
+function VehicleCard({ v, onOpen, done }) {
   const stageIdx = STAGES.findIndex((s) => s.id === v.stage);
   const pending = (v.lines || []).filter((l) => l.status === "pending").length;
-  const cost = vehicleCost(v, rate);
+  const cost = vehicleCost(v);
   return (
     <button
       onClick={() => onOpen(v.id)}
@@ -616,7 +624,7 @@ function AddVehicle({ me, existing, onSave, onCancel }) {
           <Field label="Miles" value={f.miles} onChange={set("miles")} inputMode="numeric" placeholder="84,000" />
         </div>
         <Field label="VIN" value={f.vin} onChange={set("vin")} placeholder="Full 17-digit VIN" />
-        <Field label="Purchase price (optional)" value={f.buyPrice} onChange={set("buyPrice")} inputMode="numeric" placeholder="7500" />
+        <Field label="Purchase price (optional)" value={f.buyPrice} onChange={set("buyPrice")} inputMode="decimal" placeholder="7500" />
         <div>
           <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Intake notes</label>
           <textarea
@@ -687,7 +695,7 @@ function EditVehicle({ v, others, onSave, onCancel }) {
         <Field label="Miles" value={f.miles} onChange={set("miles")} inputMode="numeric" />
       </div>
       <Field label="VIN" value={f.vin} onChange={set("vin")} />
-      <Field label="Purchase price" value={f.buyPrice} onChange={set("buyPrice")} inputMode="numeric" />
+      <Field label="Purchase price" value={f.buyPrice} onChange={set("buyPrice")} inputMode="decimal" />
       <div>
         <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Intake notes</label>
         <textarea
@@ -735,8 +743,9 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [showClockPicker, setShowClockPicker] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [generalReason, setGeneralReason] = useState(GENERAL_REASONS[0]);
   // tick every second so running clocks update live
-  const anyoneClockedIn = !!v && (v.lines || []).some((l) => openLog(l));
+  const anyoneClockedIn = !!v && ((v.lines || []).some((l) => openLog(l)) || (v.generalLogs || []).some((g) => !g.end));
   const [, setTick] = useState(0);
   useEffect(() => {
     if (!anyoneClockedIn) return;
@@ -746,8 +755,7 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
   if (!v) return <div className="p-6 text-slate-500">Vehicle not found. It may have been removed.<button onClick={onBack} className="block mt-3 text-sky-600 font-semibold">Back to board</button></div>;
 
   const stageIdx = STAGES.findIndex((s) => s.id === v.stage);
-  const rate = Number(data?.laborRate) || DEFAULT_RATE;
-  const cost = vehicleCost(v, rate);
+  const cost = vehicleCost(v);
   const approvedLines = (v.lines || []).filter((l) => l.status === "approved");
   const activity = (data.notifications || []).filter((n) => n.vehicleId === id).slice(0, 15);
 
@@ -793,15 +801,28 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
     });
   };
 
-  const editEstLabor = async (lineId, val) => {
+  // edits the full estimate — parts $, labor hours, and this line's own labor rate — in one go
+  const editEst = async (lineId, next) => {
     await mutate((d) => {
       const vv = d.vehicles.find((x) => x.id === id);
       const l = vv?.lines?.find((x) => x.id === lineId);
       if (!l) return d;
-      const from = l.estLabor;
-      l.estLabor = val;
-      l.estEdits = [...(l.estEdits || []), { by: me, ts: Date.now(), from, to: val }];
-      notify(d, `${me} changed labor estimate on "${l.desc}" (#${vv.stock}): ${money(from)} → ${money(val)}`, id, "info");
+      const fromHours = l.estLaborHours, fromRate = l.estLaborRate, fromParts = l.estParts;
+      l.estParts = next.estParts;
+      l.estLaborHours = next.estLaborHours;
+      l.estLaborRate = next.estLaborRate;
+      l.estEdits = [...(l.estEdits || []), {
+        by: me, ts: Date.now(),
+        fromParts, toParts: next.estParts,
+        fromHours, toHours: next.estLaborHours,
+        fromRate, toRate: next.estLaborRate,
+      }];
+      notify(
+        d,
+        `${me} changed the estimate on "${l.desc}" (#${vv.stock}): ${money(fromParts)} parts / ${fromHours || 0}h @ ${money(fromRate)} → ${money(next.estParts)} parts / ${next.estLaborHours || 0}h @ ${money(next.estLaborRate)}`,
+        id,
+        "info"
+      );
       return d;
     });
   };
@@ -838,6 +859,23 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
       } else {
         l.laborLogs.push({ id: uid(), by: me, start: Date.now(), end: null });
         notify(d, `${me} clocked IN on "${l.desc}" — #${vv.stock}`, id, "info");
+      }
+      return d;
+    });
+  };
+
+  const toggleGeneralClock = async (reason) => {
+    await mutate((d) => {
+      const vv = d.vehicles.find((x) => x.id === id);
+      if (!vv) return d;
+      vv.generalLogs = vv.generalLogs || [];
+      const open = vv.generalLogs.find((g) => !g.end && g.by === me);
+      if (open) {
+        open.end = Date.now();
+        notify(d, `${me} clocked out of "${open.reason}" on #${vv.stock} — ${fmtDur(open.end - open.start)} logged`, id, "stage");
+      } else {
+        vv.generalLogs.push({ id: uid(), by: me, reason, start: Date.now(), end: null });
+        notify(d, `${me} clocked IN on "${reason}" — #${vv.stock}`, id, "info");
       }
       return d;
     });
@@ -946,6 +984,9 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
           )}
         </div>
         {v.inspection && <InspectionSummary results={v.inspection.results} />}
+        {v.inspection?.notes && (
+          <p className="mt-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2.5">{v.inspection.notes}</p>
+        )}
         <button
           onClick={onInspect}
           className="mt-3 w-full py-2.5 rounded-lg font-display font-bold text-sm text-white"
@@ -962,7 +1003,7 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
           <div className="flex items-center gap-3">
             {totalLaborMs > 0 && (
               <span className="text-[11px] font-bold text-sky-700 flex items-center gap-1">
-                <Clock className="w-3.5 h-3.5" /> {fmtDur(totalLaborMs)} · {money((totalLaborMs / 3600000) * rate)}
+                <Clock className="w-3.5 h-3.5" /> {fmtDur(totalLaborMs)} · {money((v.lines || []).reduce((s, l) => s + (lineMs(l) > 0 ? (lineMs(l) / 3600000) * lineRate(l) : 0), 0))}
               </span>
             )}
             <button onClick={() => setShowAddLine(!showAddLine)} className="text-xs font-bold text-sky-600 flex items-center gap-1">
@@ -971,16 +1012,44 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mb-2">
-          Shop labor rate $
-          <input
-            value={data?.laborRate ?? DEFAULT_RATE}
-            onChange={(e) => mutate((d) => { d.laborRate = e.target.value; return d; })}
-            inputMode="numeric"
-            className="w-14 rounded border border-slate-200 px-1.5 py-0.5 text-[11px] text-slate-600"
-          />
-          /hr — clocked time bills at this rate until a final labor $ is entered
-        </div>
+        {/* general clock-in — available from the moment the vehicle is checked in, no job required */}
+        {(() => {
+          const myGeneralOpen = (v.generalLogs || []).find((g) => !g.end && g.by === me);
+          const othersGeneralOpen = (v.generalLogs || []).filter((g) => !g.end && g.by !== me);
+          return (
+            <div className="mb-3 p-3 rounded-lg border border-slate-200 bg-slate-50">
+              <p className="text-xs font-bold text-slate-700 mb-2">Clock in for something that isn't a job yet</p>
+              <div className="flex gap-2">
+                <select
+                  value={generalReason}
+                  onChange={(e) => setGeneralReason(e.target.value)}
+                  disabled={!!myGeneralOpen}
+                  className="flex-1 rounded-lg border border-slate-300 bg-white px-2.5 py-2 text-sm disabled:opacity-60"
+                >
+                  {GENERAL_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+                {myGeneralOpen ? (
+                  <button onClick={() => toggleGeneralClock(myGeneralOpen.reason)} className="px-4 py-2 rounded-lg bg-red-500 text-white text-sm font-bold flex items-center gap-1.5 shrink-0">
+                    <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" /> Clock out · {fmtDur(Date.now() - myGeneralOpen.start)}
+                  </button>
+                ) : (
+                  <button onClick={() => toggleGeneralClock(generalReason)} className="px-4 py-2 rounded-lg text-white text-sm font-bold shrink-0" style={{ background: "#0D2440" }}>
+                    Clock in
+                  </button>
+                )}
+              </div>
+              {othersGeneralOpen.length > 0 && (
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  {othersGeneralOpen.map((g) => (
+                    <span key={g.id} className="text-[10px] font-bold px-2 py-1 rounded-md bg-sky-100 text-sky-700 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse" /> {g.by} on {g.reason} · {fmtDur(Date.now() - g.start)}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* clock in — must choose the failure being worked */}
         {approvedLines.length > 0 && (
@@ -1026,7 +1095,7 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
                 const vv = d.vehicles.find((x) => x.id === id);
                 if (!vv) return d;
                 vv.lines = [...(vv.lines || []), line];
-                notify(d, `${me} requested "${line.desc}" on #${vv.stock} — needs approval (${money((Number(line.estParts) || 0) + (Number(line.estLabor) || 0))} est.)`, id, "approval");
+                notify(d, `${me} requested "${line.desc}" on #${vv.stock} — needs approval (${money(lineEst(line))} est.)`, id, "approval");
                 return d;
               });
               setShowAddLine(false);
@@ -1046,11 +1115,10 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
               key={l.id}
               l={l}
               me={me}
-              rate={rate}
               onActual={setActual}
               onParts={setParts}
               onClock={toggleClock}
-              onEditEst={editEstLabor}
+              onEditEst={editEst}
               onSupplement={(line) => {
                 setPrefill({ desc: `Additional: ${line.desc}` });
                 setShowAddLine(true);
@@ -1159,13 +1227,14 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
               checked={!!v.oilDone}
               onChange={(e) => {
                 const on = e.target.checked;
+                const price = Number(v.oilPrice) || 79.99;
                 setVehicleField(
                   on
-                    ? { oilDone: true, oilDate: v.oilDate || new Date().toISOString().slice(0, 10), oilSticker: false, oilStickerDate: null }
+                    ? { oilDone: true, oilPrice: price, oilDate: v.oilDate || new Date().toISOString().slice(0, 10), oilSticker: false, oilStickerDate: null }
                     : { oilDone: false, oilSticker: false, oilStickerDate: null },
                   on
-                    ? `${me} completed oil change on #${v.stock} — $79.99 added to recon, windshield sticker reminder active`
-                    : `${me} unchecked oil change on #${v.stock} — $79.99 removed`,
+                    ? `${me} completed oil change on #${v.stock} — ${money(price)} added to recon, windshield sticker reminder active`
+                    : `${me} unchecked oil change on #${v.stock} — ${money(price)} removed`,
                   "stage"
                 );
               }}
@@ -1174,22 +1243,33 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
             <span className="text-sm">
               <span className="font-semibold text-slate-800">Oil changed</span>
               {v.oilDone ? (
-                <span className="block text-xs text-emerald-700 font-semibold">$79.99 oil change added to recon total</span>
+                <span className="block text-xs text-emerald-700 font-semibold">{money(v.oilPrice || 79.99)} oil change added to recon total</span>
               ) : (
-                <span className="block text-xs text-slate-400">Checking this adds a $79.99 oil change to the recon total</span>
+                <span className="block text-xs text-slate-400">Checking this adds an oil change fee (defaults to $79.99) to the recon total</span>
               )}
             </span>
           </label>
 
           {v.oilDone && (
-            <div className="mt-2 ml-7">
-              <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Date of oil change</label>
-              <input
-                type="date"
-                value={v.oilDate || ""}
-                onChange={(e) => setVehicleField({ oilDate: e.target.value })}
-                className="mt-0.5 w-full max-w-[180px] rounded border border-slate-300 px-2 py-1.5 text-xs block"
-              />
+            <div className="mt-2 ml-7 grid grid-cols-2 gap-2">
+              <div>
+                <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Date of oil change</label>
+                <input
+                  type="date"
+                  value={v.oilDate || ""}
+                  onChange={(e) => setVehicleField({ oilDate: e.target.value })}
+                  className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1.5 text-xs block"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Price $</label>
+                <input
+                  value={v.oilPrice ?? 79.99}
+                  onChange={(e) => setVehicleField({ oilPrice: e.target.value })}
+                  inputMode="decimal"
+                  className="mt-0.5 w-full rounded border border-slate-300 px-2 py-1.5 text-xs block"
+                />
+              </div>
             </div>
           )}
 
@@ -1317,31 +1397,54 @@ function InspectionSummary({ results }) {
 }
 
 function AddLine({ onAdd, me, initial }) {
-  const [f, setF] = useState({ desc: initial?.desc || "", estParts: initial?.estParts || "", estLabor: initial?.estLabor || "" });
+  const [f, setF] = useState({
+    desc: initial?.desc || "", estParts: initial?.estParts || "",
+    estLaborHours: initial?.estLaborHours || "", estLaborRate: initial?.estLaborRate || "",
+  });
+  const [partsOnly, setPartsOnly] = useState(false);
+  const [saving, setSaving] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const ok = f.desc && (partsOnly || (f.estLaborHours === "" || f.estLaborRate));
   return (
     <div className="mt-2 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
       <Field label="Description" value={f.desc} onChange={set("desc")} placeholder="Front brake pads & rotors" />
+      <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 cursor-pointer">
+        <input type="checkbox" checked={partsOnly} onChange={(e) => setPartsOnly(e.target.checked)} className="w-4 h-4 accent-sky-600" />
+        Parts only — no labor on this line
+      </label>
       <div className="grid grid-cols-2 gap-2">
-        <Field label="Est. parts $" value={f.estParts} onChange={set("estParts")} inputMode="numeric" placeholder="180" />
-        <Field label="Est. labor $" value={f.estLabor} onChange={set("estLabor")} inputMode="numeric" placeholder="150" />
+        <Field label="Est. parts $" value={f.estParts} onChange={set("estParts")} inputMode="decimal" placeholder="180" />
+        {!partsOnly && <Field label="Est. labor hours" value={f.estLaborHours} onChange={set("estLaborHours")} inputMode="decimal" placeholder="1.5" />}
       </div>
+      {!partsOnly && (
+        <Field label="Labor rate $/hr for this job" value={f.estLaborRate} onChange={set("estLaborRate")} inputMode="decimal" placeholder="100" />
+      )}
       <button
-        disabled={!f.desc}
-        onClick={() => onAdd({ id: uid(), ...f, actualParts: "", actualLabor: "", status: "pending", addedBy: me, ts: Date.now(), source: "manual" })}
+        disabled={!ok || saving}
+        onClick={() => {
+          if (saving || !ok) return;
+          setSaving(true);
+          onAdd({
+            id: uid(), desc: f.desc, estParts: f.estParts,
+            estLaborHours: partsOnly ? "" : f.estLaborHours,
+            estLaborRate: partsOnly ? "" : f.estLaborRate,
+            actualParts: "", actualLabor: "", status: "pending", addedBy: me, ts: Date.now(), source: "manual",
+          });
+        }}
         className="w-full py-2 rounded-lg text-white text-sm font-bold disabled:opacity-40"
         style={{ background: "#0D2440" }}
       >
-        Add for approval
+        {saving ? "Adding…" : "Add for approval"}
       </button>
     </div>
   );
 }
 
-function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEditEst }) {
-  const est = (Number(l.estParts) || 0) + (Number(l.estLabor) || 0);
+function LineRow({ l, me, onActual, onParts, onClock, onSupplement, onEditEst }) {
+  const estLaborDollars = (Number(l.estLaborHours) || 0) * (Number(l.estLaborRate) || 0);
+  const est = (Number(l.estParts) || 0) + estLaborDollars;
   const [editingEst, setEditingEst] = useState(false);
-  const [estVal, setEstVal] = useState("");
+  const [estDraft, setEstDraft] = useState({ estParts: "", estLaborHours: "", estLaborRate: "" });
   const badge = {
     pending: ["bg-amber-100 text-amber-700", "Pending approval"],
     approved: ["bg-emerald-100 text-emerald-700", `Approved${l.decidedBy ? " · " + l.decidedBy : ""}`],
@@ -1368,12 +1471,17 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
       <div className="mt-2 grid grid-cols-2 gap-2 text-xs">
         <div className="text-slate-500">
           Est: <span className="font-bold text-slate-700">{money(est)}</span>{" "}
-          <span className="text-slate-400">({money(l.estParts)} p / {money(l.estLabor)} l)</span>
+          <span className="text-slate-400">
+            ({money(l.estParts)} parts{l.estLaborHours ? ` / ${l.estLaborHours}h @ ${money(l.estLaborRate)}` : ""})
+          </span>
           {l.status !== "declined" && !editingEst && (
             <button
-              onClick={() => { setEstVal(l.estLabor ?? ""); setEditingEst(true); }}
+              onClick={() => {
+                setEstDraft({ estParts: l.estParts ?? "", estLaborHours: l.estLaborHours ?? "", estLaborRate: l.estLaborRate ?? "" });
+                setEditingEst(true);
+              }}
               className="ml-1.5 inline-flex items-center gap-0.5 text-sky-600 font-bold align-middle"
-              aria-label="Edit labor estimate"
+              aria-label="Edit estimate"
             >
               <Pencil className="w-3 h-3" />
             </button>
@@ -1385,7 +1493,7 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
               value={l.actualLabor}
               onChange={(e) => onActual(l.id, "actualLabor", e.target.value)}
               placeholder="final labor $"
-              inputMode="numeric"
+              inputMode="decimal"
               className="w-24 rounded border border-slate-300 px-1.5 py-1 text-xs"
             />
           </div>
@@ -1393,18 +1501,40 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
       </div>
 
       {editingEst && (
-        <div className="mt-2 p-2.5 rounded-lg bg-sky-50 border border-sky-200">
-          <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">New labor estimate $</label>
-          <div className="mt-1 flex gap-2">
+        <div className="mt-2 p-2.5 rounded-lg bg-sky-50 border border-sky-200 space-y-2">
+          <div>
+            <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Parts $</label>
             <input
-              value={estVal}
-              onChange={(e) => setEstVal(e.target.value)}
-              inputMode="numeric"
+              value={estDraft.estParts}
+              onChange={(e) => setEstDraft({ ...estDraft, estParts: e.target.value })}
+              inputMode="decimal"
               autoFocus
-              className="flex-1 rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+              className="mt-0.5 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
             />
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Labor hours</label>
+              <input
+                value={estDraft.estLaborHours}
+                onChange={(e) => setEstDraft({ ...estDraft, estLaborHours: e.target.value })}
+                inputMode="decimal"
+                className="mt-0.5 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+              />
+            </div>
+            <div>
+              <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Rate $/hr</label>
+              <input
+                value={estDraft.estLaborRate}
+                onChange={(e) => setEstDraft({ ...estDraft, estLaborRate: e.target.value })}
+                inputMode="decimal"
+                className="mt-0.5 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
+              />
+            </div>
+          </div>
+          <div className="flex gap-2">
             <button
-              onClick={() => { onEditEst(l.id, estVal); setEditingEst(false); }}
+              onClick={() => { onEditEst(l.id, estDraft); setEditingEst(false); }}
               className="px-3 py-1.5 rounded-lg text-white text-[11px] font-bold"
               style={{ background: "#0D2440" }}
             >
@@ -1414,14 +1544,16 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
               Cancel
             </button>
           </div>
-          <p className="mt-1 text-[10px] text-slate-500">The change is stamped with your name, date, and time.</p>
+          <p className="text-[10px] text-slate-500">The change is stamped with your name, date, and time.</p>
         </div>
       )}
 
       {lastEdit && !editingEst && (
         <p className="mt-1 text-[10px] text-amber-700 font-semibold">
-          Labor est. edited by {lastEdit.by} · {new Date(lastEdit.ts).toLocaleDateString()}{" "}
-          {new Date(lastEdit.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} · {money(lastEdit.from)} → {money(lastEdit.to)}
+          Estimate edited by {lastEdit.by} · {new Date(lastEdit.ts).toLocaleDateString()}{" "}
+          {new Date(lastEdit.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })} ·{" "}
+          {money(lastEdit.fromParts)} parts / {lastEdit.fromHours || 0}h @ {money(lastEdit.fromRate)} →{" "}
+          {money(lastEdit.toParts)} parts / {lastEdit.toHours || 0}h @ {money(lastEdit.toRate)}
           {(l.estEdits || []).length > 1 ? ` (${l.estEdits.length} edits total)` : ""}
         </p>
       )}
@@ -1457,7 +1589,7 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
                     value={l.partsFinal ?? ""}
                     onChange={(e) => onActual(l.id, "partsFinal", e.target.value)}
                     placeholder={l.estParts ? `est. ${l.estParts}` : "0"}
-                    inputMode="numeric"
+                    inputMode="decimal"
                     className="mt-0.5 w-full rounded border border-slate-300 bg-white px-2 py-1.5 text-xs"
                   />
                 </div>
@@ -1484,7 +1616,7 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
             {/* labor clock */}
             {logged > 0 && (
               <span className="text-[11px] text-sky-700 font-bold">
-                Labor so far: {fmtDur(logged)} · {money((logged / 3600000) * (Number(rate) || DEFAULT_RATE))}
+                Labor so far: {fmtDur(logged)} · {money((logged / 3600000) * lineRate(l))}
               </span>
             )}
             {othersOpen.map((g) => (
@@ -1524,7 +1656,9 @@ function LineRow({ l, me, rate, onActual, onParts, onClock, onSupplement, onEdit
 function Inspection({ data, id, me, onSubmit, onCancel }) {
   const v = (data?.vehicles || []).find((x) => x.id === id);
   const [results, setResults] = useState({});
-  const [fails, setFails] = useState({}); // key -> {note, estParts, estLabor}
+  const [fails, setFails] = useState({}); // key -> {note, estParts, estLaborHours, estLaborRate}
+  const [generalNotes, setGeneralNotes] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   if (!v) return null;
   const total = CHECKLIST.reduce((s, c) => s + c.items.length, 0);
@@ -1532,29 +1666,42 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
 
   const setStatus = (key, status) => {
     setResults({ ...results, [key]: { status } });
-    if (status === "fail" && !fails[key]) setFails({ ...fails, [key]: { note: "", estParts: "", estLabor: "" } });
+    if (status === "fail" && !fails[key]) setFails({ ...fails, [key]: { note: "", estParts: "", estLaborHours: "", estLaborRate: "" } });
   };
   const setFail = (key, field, val) => setFails({ ...fails, [key]: { ...fails[key], [field]: val } });
 
   const submit = () => {
+    if (submitting) return;
+    setSubmitting(true);
     const lines = Object.entries(results)
       .filter(([, r]) => r.status === "fail")
       .map(([key]) => {
         const f = fails[key] || {};
         return {
           id: uid(), desc: key.split("||")[1], note: f.note || "",
-          estParts: f.estParts || "", estLabor: f.estLabor || "",
+          estParts: f.estParts || "", estLaborHours: f.estLaborHours || "", estLaborRate: f.estLaborRate || "",
           actualParts: "", actualLabor: "",
           status: "pending", addedBy: me, ts: Date.now(), source: "inspection",
         };
       });
-    onSubmit(results, lines);
+    onSubmit(results, lines, generalNotes);
   };
 
   return (
     <div className="flex-1 p-4 pb-28">
       <BackBar onBack={onCancel} title={`Inspect #${v.stock}`} />
       <p className="text-xs text-slate-500 -mt-2 mb-3">{v.year} {v.make} {v.model} · fails auto-create repair lines for approval</p>
+
+      <div className="mb-4">
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">General notes / comments</label>
+        <textarea
+          value={generalNotes}
+          onChange={(e) => setGeneralNotes(e.target.value)}
+          rows={2}
+          placeholder="Anything else worth noting about this inspection…"
+          className="mt-1 w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm focus:outline-none focus:border-sky-500"
+        />
+      </div>
 
       {CHECKLIST.map((sec) => (
         <div key={sec.section} className="mb-4">
@@ -1584,17 +1731,23 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
                         placeholder="What's wrong? (e.g., pads at 2mm, rotor scored)"
                         className="w-full rounded border border-red-200 bg-white px-2 py-1.5 text-xs"
                       />
-                      <div className="grid grid-cols-2 gap-2">
+                      <div className="grid grid-cols-3 gap-2">
                         <input
                           value={fails[key]?.estParts || ""}
                           onChange={(e) => setFail(key, "estParts", e.target.value)}
-                          placeholder="Est. parts $" inputMode="numeric"
+                          placeholder="Parts $" inputMode="decimal"
                           className="rounded border border-red-200 bg-white px-2 py-1.5 text-xs"
                         />
                         <input
-                          value={fails[key]?.estLabor || ""}
-                          onChange={(e) => setFail(key, "estLabor", e.target.value)}
-                          placeholder="Est. labor $" inputMode="numeric"
+                          value={fails[key]?.estLaborHours || ""}
+                          onChange={(e) => setFail(key, "estLaborHours", e.target.value)}
+                          placeholder="Labor hrs" inputMode="decimal"
+                          className="rounded border border-red-200 bg-white px-2 py-1.5 text-xs"
+                        />
+                        <input
+                          value={fails[key]?.estLaborRate || ""}
+                          onChange={(e) => setFail(key, "estLaborRate", e.target.value)}
+                          placeholder="Rate $/hr" inputMode="decimal"
                           className="rounded border border-red-200 bg-white px-2 py-1.5 text-xs"
                         />
                       </div>
@@ -1614,12 +1767,12 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
             <span className="text-red-600 font-semibold">{Object.values(results).filter((r) => r.status === "fail").length} fails</span>
           </div>
           <button
-            disabled={answered === 0}
+            disabled={answered === 0 || submitting}
             onClick={submit}
             className="px-6 py-3 rounded-xl text-white font-display font-bold disabled:opacity-40"
             style={{ background: "#0D2440" }}
           >
-            Submit inspection
+            {submitting ? "Submitting…" : "Submit inspection"}
           </button>
         </div>
       </div>
@@ -1648,7 +1801,11 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
     (v.lines || []).forEach((l) => { if (l.status === "pending") items.push({ v, l }); })
   );
 
+  const [deciding, setDeciding] = useState(() => new Set());
+
   const decide = async (vehicleId, lineId, status) => {
+    if (deciding.has(lineId)) return;
+    setDeciding((s) => new Set(s).add(lineId));
     await mutate((d) => {
       const vv = d.vehicles.find((x) => x.id === vehicleId);
       const l = vv?.lines?.find((x) => x.id === lineId);
@@ -1659,9 +1816,10 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
       notify(d, `${me} ${status} "${l.desc}" on #${vv.stock}`, vehicleId, status === "approved" ? "approved" : "declined");
       return d;
     });
+    setDeciding((s) => { const n = new Set(s); n.delete(lineId); return n; });
   };
 
-  const totalEst = items.reduce((s, { l }) => s + (Number(l.estParts) || 0) + (Number(l.estLabor) || 0), 0);
+  const totalEst = items.reduce((s, { l }) => s + lineEst(l), 0);
 
   return (
     <div className="flex-1 p-4 pb-10">
@@ -1684,15 +1842,23 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
             <p className="mt-1 font-semibold text-slate-800 text-sm">{l.desc}</p>
             {l.note && <p className="text-xs text-slate-500 mt-0.5">{l.note}</p>}
             <p className="text-xs text-slate-500 mt-1">
-              Est. <span className="font-bold text-slate-700">{money((Number(l.estParts) || 0) + (Number(l.estLabor) || 0))}</span>
-              {" "}({money(l.estParts)} parts / {money(l.estLabor)} labor) · by {l.addedBy}
+              Est. <span className="font-bold text-slate-700">{money(lineEst(l))}</span>
+              {" "}({money(l.estParts)} parts{l.estLaborHours ? ` / ${l.estLaborHours}h @ ${money(l.estLaborRate)}` : ""}) · by {l.addedBy}
             </p>
             <div className="mt-3 grid grid-cols-2 gap-2">
-              <button onClick={() => decide(v.id, l.id, "approved")} className="py-2.5 rounded-lg bg-emerald-500 text-white text-sm font-bold flex items-center justify-center gap-1.5">
-                <Check className="w-4 h-4" /> Approve
+              <button
+                onClick={() => decide(v.id, l.id, "approved")}
+                disabled={deciding.has(l.id)}
+                className="py-2.5 rounded-lg bg-emerald-500 text-white text-sm font-bold flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Check className="w-4 h-4" /> {deciding.has(l.id) ? "Saving…" : "Approve"}
               </button>
-              <button onClick={() => decide(v.id, l.id, "declined")} className="py-2.5 rounded-lg bg-slate-200 text-slate-600 text-sm font-bold flex items-center justify-center gap-1.5">
-                <X className="w-4 h-4" /> Decline
+              <button
+                onClick={() => decide(v.id, l.id, "declined")}
+                disabled={deciding.has(l.id)}
+                className="py-2.5 rounded-lg bg-slate-200 text-slate-600 text-sm font-bold flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <X className="w-4 h-4" /> {deciding.has(l.id) ? "Saving…" : "Decline"}
               </button>
             </div>
           </div>
@@ -1731,13 +1897,13 @@ function Dashboard({ data, onOpen }) {
       )}
 
       <div className="space-y-4">
-        {vehicles.map((v) => <DashCard key={v.id} v={v} rate={data?.laborRate} onOpen={onOpen} />)}
+        {vehicles.map((v) => <DashCard key={v.id} v={v} onOpen={onOpen} />)}
       </div>
     </div>
   );
 }
 
-function DashCard({ v, rate, onOpen }) {
+function DashCard({ v, onOpen }) {
   const stage = STAGES.find((s) => s.id === v.stage);
   const results = v.inspection?.results || null;
   const failedItems = results
@@ -1747,8 +1913,8 @@ function DashCard({ v, rate, onOpen }) {
 
   const pendingLines = lines.filter((l) => l.status === "pending");
   const approvedLines = lines.filter((l) => l.status === "approved");
-  const pendingEst = pendingLines.reduce((s, l) => s + (Number(l.estParts) || 0) + (Number(l.estLabor) || 0), 0);
-  const approvedCost = approvedLines.reduce((s, l) => s + linePartsCost(l) + lineLabor(l, rate), 0);
+  const pendingEst = pendingLines.reduce((s, l) => s + lineEst(l), 0);
+  const approvedCost = approvedLines.reduce((s, l) => s + linePartsCost(l) + lineLabor(l), 0);
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
@@ -1777,11 +1943,11 @@ function DashCard({ v, rate, onOpen }) {
           {v.oilDone && (
             v.oilSticker ? (
               <span className="text-[10px] font-bold px-2 py-1 rounded-md bg-emerald-100 text-emerald-700">
-                Oil ✓ · $79.99{v.oilDate ? ` · ${new Date(v.oilDate + "T12:00").toLocaleDateString()}` : ""} · sticker on{v.oilStickerDate ? ` ${new Date(v.oilStickerDate + "T12:00").toLocaleDateString()}` : ""}
+                Oil ✓ · {money(v.oilPrice || 79.99)}{v.oilDate ? ` · ${new Date(v.oilDate + "T12:00").toLocaleDateString()}` : ""} · sticker on{v.oilStickerDate ? ` ${new Date(v.oilStickerDate + "T12:00").toLocaleDateString()}` : ""}
               </span>
             ) : (
               <span className="text-[10px] font-bold px-2 py-1 rounded-md bg-amber-100 text-amber-800">
-                Oil ✓ · $79.99{v.oilDate ? ` · ${new Date(v.oilDate + "T12:00").toLocaleDateString()}` : ""} — STICKER NEEDED
+                Oil ✓ · {money(v.oilPrice || 79.99)}{v.oilDate ? ` · ${new Date(v.oilDate + "T12:00").toLocaleDateString()}` : ""} — STICKER NEEDED
               </span>
             )
           )}
@@ -1801,6 +1967,9 @@ function DashCard({ v, rate, onOpen }) {
         ) : (
           <>
             <InspectionSummary results={results} />
+            {v.inspection.notes && (
+              <p className="mt-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg p-2 -mx-0">{v.inspection.notes}</p>
+            )}
             {failedItems.length > 0 && (
               <div className="mt-2 space-y-1">
                 {failedItems.map(([sec, item]) => {
@@ -1878,7 +2047,7 @@ function DashCard({ v, rate, onOpen }) {
           <div className="mt-2 space-y-1.5">
             {lines.map((l) => {
               const parts = linePartsCost(l);
-              const labor = lineLabor(l, rate);
+              const labor = lineLabor(l);
               const laborFromClock = (l.actualLabor === "" || l.actualLabor == null) && lineMs(l) > 0;
               const isActual = l.status === "approved" && ((l.partsFinal !== "" && l.partsFinal != null) || (l.actualLabor !== "" && l.actualLabor != null) || laborFromClock);
               return (
@@ -1929,7 +2098,6 @@ function FinalizeRecon({ data, id, me, required, mutate, notify, onBack }) {
   const [signName, setSignName] = useState("");
   if (!v) return null;
 
-  const rate = Number(data?.laborRate) || DEFAULT_RATE;
   const lines = (v.lines || []).filter((l) => l.status !== "declined");
   const declined = (v.lines || []).filter((l) => l.status === "declined");
 
@@ -1939,11 +2107,12 @@ function FinalizeRecon({ data, id, me, required, mutate, notify, onBack }) {
     return Object.entries(m);
   };
 
+  const oilPrice = Number(v.oilPrice) || 79.99;
   const partsTotal = lines.reduce((s, l) => s + linePartsCost(l), 0);
-  const laborTotal = lines.reduce((s, l) => s + lineLabor(l, rate), 0);
+  const laborTotal = lines.reduce((s, l) => s + lineLabor(l), 0);
   const laborMsTotal = lines.reduce((s, l) => s + lineMs(l), 0);
-  const fees = (v.detailDone ? 150 : 0) + (v.emPassed ? 16.15 : 0) + (v.oilDone ? 79.99 : 0);
-  const grand = vehicleCost(v, rate);
+  const fees = (v.detailDone ? 150 : 0) + (v.emPassed ? 16.15 : 0) + (v.oilDone ? oilPrice : 0);
+  const grand = vehicleCost(v);
   const unfinished = lines.filter((l) => l.status === "pending").length;
 
   const sign = async () => {
@@ -1994,8 +2163,8 @@ function FinalizeRecon({ data, id, me, required, mutate, notify, onBack }) {
                 </div>
                 <div className="text-right shrink-0 text-xs">
                   <div className="text-slate-500">Parts: <span className="font-bold text-slate-700">{money(linePartsCost(l))}</span>{l.partsVendor ? <span className="text-slate-400"> · {l.partsVendor}</span> : null}</div>
-                  <div className="text-slate-500">Labor: <span className="font-bold text-slate-700">{money(lineLabor(l, rate))}</span>{lineMs(l) > 0 && <span className="text-slate-400"> · {fmtDur(lineMs(l))}</span>}</div>
-                  <div className="font-display font-bold text-slate-800 mt-0.5">{money(linePartsCost(l) + lineLabor(l, rate))}</div>
+                  <div className="text-slate-500">Labor: <span className="font-bold text-slate-700">{money(lineLabor(l))}</span>{lineMs(l) > 0 && <span className="text-slate-400"> · {fmtDur(lineMs(l))}</span>}</div>
+                  <div className="font-display font-bold text-slate-800 mt-0.5">{money(linePartsCost(l) + lineLabor(l))}</div>
                 </div>
               </div>
             </div>
@@ -2017,7 +2186,7 @@ function FinalizeRecon({ data, id, me, required, mutate, notify, onBack }) {
           {v.oilDone && (
             <div className="p-3.5 flex items-center justify-between text-sm">
               <span className="font-semibold text-slate-800">Oil change <span className="text-[11px] font-normal text-slate-400">· {v.oilDate ? new Date(v.oilDate + "T12:00").toLocaleDateString() : "—"}{v.oilSticker ? " · sticker on" : " · STICKER NEEDED"}</span></span>
-              <span className="font-display font-bold text-slate-800">{money(79.99)}</span>
+              <span className="font-display font-bold text-slate-800">{money(oilPrice)}</span>
             </div>
           )}
         </div>
@@ -2113,7 +2282,6 @@ function LaborReport({ data, onOpen }) {
     return () => clearInterval(t);
   }, []);
 
-  const rate = Number(data?.laborRate) || DEFAULT_RATE;
   const vehicles = data?.vehicles || [];
   const from = PERIODS.find((p) => p.id === period).from();
 
@@ -2133,16 +2301,22 @@ function LaborReport({ data, onOpen }) {
     .filter((e) => techF === "all" || e.g.by === techF)
     .sort((a, b) => b.g.start - a.g.start);
 
+  const entryBilled = (e) => (e.ms / 3600000) * lineRate(e.l);
   const totalMs = filtered.reduce((s, e) => s + e.ms, 0);
+  const totalBilled = filtered.reduce((s, e) => s + entryBilled(e), 0);
   const byTech = {};
-  filtered.forEach((e) => { byTech[e.g.by] = (byTech[e.g.by] || 0) + e.ms; });
+  const byTechBilled = {};
+  filtered.forEach((e) => {
+    byTech[e.g.by] = (byTech[e.g.by] || 0) + e.ms;
+    byTechBilled[e.g.by] = (byTechBilled[e.g.by] || 0) + entryBilled(e);
+  });
 
   const sel = "rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs font-semibold text-slate-700";
 
   return (
     <div className="flex-1 p-4 pb-10">
       <h2 className="font-display font-bold text-lg text-slate-800 mb-1">Labor hours</h2>
-      <p className="text-xs text-slate-500 mb-3">Every clocked entry across the lot, billed at {money(rate)}/hr.</p>
+      <p className="text-xs text-slate-500 mb-3">Every clocked entry across the lot, billed at each job's own rate.</p>
 
       {/* filters */}
       <div className="grid grid-cols-3 gap-2 mb-3">
@@ -2168,14 +2342,14 @@ function LaborReport({ data, onOpen }) {
           </div>
           <div className="text-right">
             <div className="text-[10px] uppercase tracking-widest text-sky-400 font-bold">Billed value</div>
-            <div className="font-display font-extrabold text-2xl">{money((totalMs / 3600000) * rate)}</div>
+            <div className="font-display font-extrabold text-2xl">{money(totalBilled)}</div>
           </div>
         </div>
         {Object.keys(byTech).length > 0 && (
           <div className="mt-3 pt-3 border-t border-sky-900 flex flex-wrap gap-2">
             {Object.entries(byTech).sort((a, b) => b[1] - a[1]).map(([who, ms]) => (
               <span key={who} className="text-[11px] font-bold px-2.5 py-1 rounded-full" style={{ background: "rgba(59,140,222,0.25)" }}>
-                {who}: {fmtDur(ms)} · {money((ms / 3600000) * rate)}
+                {who}: {fmtDur(ms)} · {money(byTechBilled[who] || 0)}
               </span>
             ))}
           </div>
@@ -2215,7 +2389,7 @@ function LaborReport({ data, onOpen }) {
                 ) : (
                   <>
                     <div className="text-sm font-bold text-slate-700">{fmtDur(e.ms)}</div>
-                    <div className="text-[11px] text-slate-400">{money((e.ms / 3600000) * rate)}</div>
+                    <div className="text-[11px] text-slate-400">{money(entryBilled(e))}</div>
                   </>
                 )}
               </div>
@@ -2243,15 +2417,14 @@ const fmtHour = (h) => {
   const hh = h > 12 ? h - 12 : h;
   return `${hh} ${ampm}`;
 };
-// estimated labor $ ÷ shop rate = hours to block out (min 1, whole hours)
-const jobHours = (l, rate) => Math.min(8, Math.max(1, Math.round((Number(l.estLabor) || 0) / (Number(rate) || DEFAULT_RATE)) || 1));
+// estimated labor hours (already in hours now) = hours to block out on the schedule (min 1, whole hours, capped at 8)
+const jobHours = (l) => Math.min(8, Math.max(1, Math.round(Number(l.estLaborHours) || 0) || 1));
 
 function SchedulePage({ data, me, mutate, notify, onOpen }) {
   const [day, setDay] = useState(dateKey(new Date()));
   const [picked, setPicked] = useState(null); // job selected to place: {vId, lineId}
   const [msg, setMsg] = useState(null);
 
-  const rate = Number(data?.laborRate) || DEFAULT_RATE;
   const vehicles = data?.vehicles || [];
 
   // all approved jobs across the lot
@@ -2282,7 +2455,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
     if (!picked) return;
     const job = jobs.find(({ v, l }) => v.id === picked.vId && l.id === picked.lineId);
     if (!job) { setPicked(null); return; }
-    const hrs = jobHours(job.l, rate);
+    const hrs = jobHours(job.l);
     if (start + hrs > DAY_END) {
       setMsg(`"${job.l.desc}" needs ${hrs}h — it won't fit starting at ${fmtHour(start)} (day ends 3 PM).`);
       return;
@@ -2320,7 +2493,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
   return (
     <div className="flex-1 p-4 pb-10">
       <h2 className="font-display font-bold text-lg text-slate-800 mb-1">Schedule</h2>
-      <p className="text-xs text-slate-500 mb-3">Tap a job below, then tap an open slot. Jobs block out their estimated hours (est. labor ÷ {money(rate)}/hr).</p>
+      <p className="text-xs text-slate-500 mb-3">Tap a job below, then tap an open slot. Jobs block out their estimated labor hours.</p>
 
       {/* day nav */}
       <div className="flex items-center justify-between mb-3 rounded-xl px-3 py-2.5 text-white" style={{ background: "#0D2440" }}>
@@ -2362,7 +2535,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                   }`}
                   style={sel ? { background: "#3B8CDE" } : undefined}
                 >
-                  #{v.stock} · {l.desc} · {jobHours(l, rate)}h
+                  #{v.stock} · {l.desc} · {jobHours(l)}h
                 </button>
               );
             })}
@@ -2406,7 +2579,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                           #{job.v.stock} {job.l.desc}
                         </button>
                         <div className="flex items-center justify-between">
-                          <span className="text-[9px] text-sky-300">{job.l.sched.hours}h · {money(jobHours(job.l, rate) * rate)} est</span>
+                          <span className="text-[9px] text-sky-300">{job.l.sched.hours}h · {money(lineEst(job.l))} est</span>
                           <button onClick={() => unschedule(job.v.id, job.l.id)} className="text-[9px] font-bold text-red-300 underline">remove</button>
                         </div>
                       </div>

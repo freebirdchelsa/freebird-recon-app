@@ -45,6 +45,7 @@ export function vehicleToFields(v) {
     'Inspection By': v.inspection?.by || '',
     'Inspection Ts': v.inspection?.ts ?? null,
     'Inspection Results': v.inspection ? JSON.stringify(v.inspection.results || {}) : '',
+    'Inspection Notes': v.inspection?.notes || '',
     'Detail Done': !!v.detailDone,
     'Detail Ts': v.detailTs ?? null,
     'Detail By': v.detailBy || '',
@@ -52,6 +53,7 @@ export function vehicleToFields(v) {
     'Em Date': v.emDate || null,
     'Em By': v.emBy || '',
     'Oil Done': !!v.oilDone,
+    'Oil Price': numOrNull(v.oilPrice),
     'Oil Date': v.oilDate || null,
     'Oil Sticker': !!v.oilSticker,
     'Oil Sticker Date': v.oilStickerDate || null,
@@ -76,7 +78,7 @@ export function fieldsToVehicle(rec) {
     addedTs: f['Added Ts'] ?? Date.now(),
     addedBy: f['Added By'] || '',
     inspection: f['Inspection Ts']
-      ? { by: f['Inspection By'] || '', ts: f['Inspection Ts'], results: safeJSON(f['Inspection Results']) }
+      ? { by: f['Inspection By'] || '', ts: f['Inspection Ts'], results: safeJSON(f['Inspection Results']), notes: f['Inspection Notes'] || '' }
       : null,
     detailDone: !!f['Detail Done'],
     detailTs: f['Detail Ts'] ?? null,
@@ -85,11 +87,13 @@ export function fieldsToVehicle(rec) {
     emDate: f['Em Date'] || null,
     emBy: f['Em By'] || null,
     oilDone: !!f['Oil Done'],
+    oilPrice: f['Oil Price'] ?? '',
     oilDate: f['Oil Date'] || null,
     oilSticker: !!f['Oil Sticker'],
     oilStickerDate: f['Oil Sticker Date'] || null,
     finalSign: f['Final Sign Ts'] ? { by: f['Final Sign By'] || '', ts: f['Final Sign Ts'] } : null,
     lines: [],
+    generalLogs: [],
   };
 }
 
@@ -108,7 +112,8 @@ export function lineToFields(l, vehicleRecordId) {
     'Decided By': l.decidedBy || '',
     'Decided Ts': l.decidedTs ?? null,
     'Est Parts': numOrNull(l.estParts),
-    'Est Labor': numOrNull(l.estLabor),
+    'Est Labor Hours': numOrNull(l.estLaborHours),
+    'Est Labor Rate': numOrNull(l.estLaborRate),
     'Actual Parts': numOrNull(l.actualParts),
     'Actual Labor': numOrNull(l.actualLabor),
     'Parts Status': l.partsStatus || 'none',
@@ -138,7 +143,8 @@ export function fieldsToLine(rec) {
     decidedBy: f['Decided By'] || '',
     decidedTs: f['Decided Ts'] ?? null,
     estParts: f['Est Parts'] ?? '',
-    estLabor: f['Est Labor'] ?? '',
+    estLaborHours: f['Est Labor Hours'] ?? '',
+    estLaborRate: f['Est Labor Rate'] ?? '',
     actualParts: f['Actual Parts'] ?? '',
     actualLabor: f['Actual Labor'] ?? '',
     estEdits: [],
@@ -152,7 +158,7 @@ export function fieldsToLine(rec) {
   };
 }
 
-/* ---------- labor logs ---------- */
+/* ---------- labor logs (job-specific, linked to a Repair Line) ---------- */
 
 export function logToFields(g, lineRecordId) {
   return {
@@ -175,6 +181,33 @@ export function fieldsToLog(rec) {
   };
 }
 
+/* ---------- general labor logs (non-job, linked straight to a Vehicle) ---------- */
+// Uses the same Labor Logs table, but links "Vehicle" instead of "Repair Line"
+// and fills in "Reason" instead of a job.
+
+export function generalLogToFields(g, vehicleRecordId) {
+  return {
+    'App Id': g.id,
+    Vehicle: vehicleRecordId ? [vehicleRecordId] : [],
+    Reason: g.reason || '',
+    By: g.by || '',
+    Start: g.start ?? null,
+    End: g.end ?? null,
+  };
+}
+
+export function fieldsToGeneralLog(rec) {
+  const f = rec.fields;
+  return {
+    id: f['App Id'],
+    by: f['By'] || '',
+    reason: f['Reason'] || '',
+    start: f['Start'] ?? null,
+    end: f['End'] ?? null,
+    _vehicleRecId: (f['Vehicle'] || [])[0] || null,
+  };
+}
+
 /* ---------- estimate edits ---------- */
 
 export function estEditToFields(e, lineRecordId) {
@@ -183,8 +216,12 @@ export function estEditToFields(e, lineRecordId) {
     'Repair Line': lineRecordId ? [lineRecordId] : [],
     By: e.by || '',
     Ts: e.ts ?? null,
-    From: numOrNull(e.from),
-    To: numOrNull(e.to),
+    'From Parts': numOrNull(e.fromParts),
+    'To Parts': numOrNull(e.toParts),
+    'From Hours': numOrNull(e.fromHours),
+    'To Hours': numOrNull(e.toHours),
+    'From Rate': numOrNull(e.fromRate),
+    'To Rate': numOrNull(e.toRate),
   };
 }
 
@@ -194,8 +231,12 @@ export function fieldsToEstEdit(rec) {
     id: f['App Id'],
     by: f['By'] || '',
     ts: f['Ts'] ?? Date.now(),
-    from: f['From'] ?? '',
-    to: f['To'] ?? '',
+    fromParts: f['From Parts'] ?? '',
+    toParts: f['To Parts'] ?? '',
+    fromHours: f['From Hours'] ?? '',
+    toHours: f['To Hours'] ?? '',
+    fromRate: f['From Rate'] ?? '',
+    toRate: f['To Rate'] ?? '',
     _lineRecId: (f['Repair Line'] || [])[0] || null,
   };
 }
