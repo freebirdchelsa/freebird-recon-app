@@ -14,6 +14,7 @@ export default defineConfig(({ mode }) => {
       devAirtableProxy(env),
       VitePWA({
         registerType: 'autoUpdate',
+        injectRegister: false,
         manifest: {
           name: 'FreeBird Recon',
           short_name: 'FB Recon',
