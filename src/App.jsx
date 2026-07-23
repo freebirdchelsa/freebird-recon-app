@@ -884,6 +884,18 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
 
   const totalLaborMs = (v.lines || []).reduce((s, l) => s + lineMs(l), 0);
 
+  const deleteLine = async (lineId) => {
+    await mutate((d) => {
+      const vv = d.vehicles.find((x) => x.id === id);
+      if (!vv) return d;
+      const l = vv.lines?.find((x) => x.id === lineId);
+      if (!l) return d;
+      vv.lines = vv.lines.filter((x) => x.id !== lineId);
+      notify(d, `${me} deleted "${l.desc}" on #${vv.stock} (mistaken/duplicate entry)`, id, "info");
+      return d;
+    });
+  };
+
   const removeVehicle = async () => {
     await mutate((d) => {
       d.vehicles = d.vehicles.filter((x) => x.id !== id);
@@ -1120,6 +1132,7 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
               onParts={setParts}
               onClock={toggleClock}
               onEditEst={editEst}
+              onDelete={deleteLine}
               onSupplement={(line) => {
                 setPrefill({ desc: `Additional: ${line.desc}` });
                 setShowAddLine(true);
@@ -1466,11 +1479,12 @@ function AddLine({ onAdd, me, initial }) {
   );
 }
 
-function LineRow({ l, me, onActual, onParts, onClock, onSupplement, onEditEst }) {
+function LineRow({ l, me, onActual, onParts, onClock, onSupplement, onEditEst, onDelete }) {
   const estLaborDollars = (Number(l.estLaborHours) || 0) * (Number(l.estLaborRate) || 0);
   const est = (Number(l.estParts) || 0) + estLaborDollars;
   const [editingEst, setEditingEst] = useState(false);
   const [estDraft, setEstDraft] = useState({ estParts: "", estLaborHours: "", estLaborRate: "" });
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const badge = {
     pending: ["bg-amber-100 text-amber-700", "Pending approval"],
     approved: ["bg-emerald-100 text-emerald-700", `Approved${l.decidedBy ? " · " + l.decidedBy : ""}`],
@@ -1673,6 +1687,20 @@ function LineRow({ l, me, onActual, onParts, onClock, onSupplement, onEditEst })
           ))}
         </div>
       )}
+
+      {confirmDelete ? (
+        <div className="mt-2 p-2.5 rounded-lg border border-red-300 bg-red-50">
+          <p className="text-xs font-semibold text-red-700 mb-2">Delete this line entirely? For duplicates or mistakes — this can't be undone.</p>
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={() => onDelete(l.id)} className="py-2 rounded-lg bg-red-600 text-white text-xs font-bold">Yes, delete it</button>
+            <button onClick={() => setConfirmDelete(false)} className="py-2 rounded-lg bg-white border border-slate-300 text-slate-600 text-xs font-bold">Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setConfirmDelete(true)} className="mt-2 text-[11px] font-bold text-red-500 flex items-center gap-1">
+          <Trash2 className="w-3 h-3" /> Delete (duplicate/mistake)
+        </button>
+      )}
     </div>
   );
 }
@@ -1828,6 +1856,7 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
   );
 
   const [deciding, setDeciding] = useState(() => new Set());
+  const [confirmDelete, setConfirmDelete] = useState(null); // lineId awaiting delete confirmation
 
   const decide = async (vehicleId, lineId, status) => {
     if (deciding.has(lineId)) return;
@@ -1843,6 +1872,19 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
       return d;
     });
     setDeciding((s) => { const n = new Set(s); n.delete(lineId); return n; });
+  };
+
+  const deleteLine = async (vehicleId, lineId) => {
+    await mutate((d) => {
+      const vv = d.vehicles.find((x) => x.id === vehicleId);
+      if (!vv) return d;
+      const l = vv.lines?.find((x) => x.id === lineId);
+      if (!l) return d;
+      vv.lines = vv.lines.filter((x) => x.id !== lineId);
+      notify(d, `${me} deleted "${l.desc}" on #${vv.stock} (mistaken/duplicate entry)`, vehicleId, "info");
+      return d;
+    });
+    setConfirmDelete(null);
   };
 
   const totalEst = items.reduce((s, { l }) => s + lineEst(l), 0);
@@ -1887,6 +1929,20 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
                 <X className="w-4 h-4" /> {deciding.has(l.id) ? "Saving…" : "Decline"}
               </button>
             </div>
+
+            {confirmDelete === l.id ? (
+              <div className="mt-2 p-2.5 rounded-lg border border-red-300 bg-red-50">
+                <p className="text-xs font-semibold text-red-700 mb-2">Delete this line entirely? For duplicates or mistakes — this can't be undone.</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => deleteLine(v.id, l.id)} className="py-2 rounded-lg bg-red-600 text-white text-xs font-bold">Yes, delete it</button>
+                  <button onClick={() => setConfirmDelete(null)} className="py-2 rounded-lg bg-white border border-slate-300 text-slate-600 text-xs font-bold">Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setConfirmDelete(l.id)} className="mt-2 text-[11px] font-bold text-red-500 flex items-center gap-1">
+                <Trash2 className="w-3 h-3" /> Delete (duplicate/mistake)
+              </button>
+            )}
           </div>
         ))}
       </div>
