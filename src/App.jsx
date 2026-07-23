@@ -93,7 +93,7 @@ const linePartsCost = (l) =>
 // pre-approval estimate: parts $ + labor hours × this line's rate
 const lineEst = (l) => (Number(l.estParts) || 0) + (Number(l.estLaborHours) || 0) * (Number(l.estLaborRate) || 0);
 
-const emptyData = { vehicles: [], notifications: [] };
+const emptyData = { vehicles: [], notifications: [], miscJobs: [] };
 
 // initStorage()/persist()/tryRead() and the "shared"->"personal"->"memory"
 // storageMode now live in ./data/airtableStore.js (Airtable-backed, falling back
@@ -201,15 +201,16 @@ function Main() {
   // mutate = apply change to the live local copy, then write through to storage.
   // Local state is the source of truth, so a flaky save never makes vehicles disappear.
   const mutate = useCallback(async (fn) => {
+    const next = fn(clone(dataRef.current)) || dataRef.current;
+    applyData(next);
     try {
-      const next = fn(clone(dataRef.current)) || dataRef.current;
-      applyData(next);
       await persist(next);
-      return next;
     } catch (e) {
-      setErr(e?.message || String(e));
-      return dataRef.current;
+      // the local change above already applied — this means it did NOT save to
+      // the shared database, so the change will be lost on reload unless retried
+      setErr(`Didn't save to the shared database: ${e?.message || String(e)}`);
     }
+    return next;
   }, [applyData]);
 
   const notify = (d, text, vehicleId, type = "info") => {
@@ -1396,6 +1397,31 @@ function InspectionSummary({ results }) {
   );
 }
 
+function AddMiscJob({ onAdd, onCancel }) {
+  const [desc, setDesc] = useState("");
+  const [hours, setHours] = useState("");
+  const [saving, setSaving] = useState(false);
+  const ok = desc.trim() && Number(hours) > 0;
+  return (
+    <div className="mb-2 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
+      <p className="text-xs font-bold text-slate-600">Service job not tied to a recon vehicle</p>
+      <Field label="Description" value={desc} onChange={(e) => setDesc(e.target.value)} placeholder="Customer oil change, warranty repair, etc." />
+      <Field label="Hours" value={hours} onChange={(e) => setHours(e.target.value)} inputMode="decimal" placeholder="2" />
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          disabled={!ok || saving}
+          onClick={() => { if (saving || !ok) return; setSaving(true); onAdd(desc.trim(), hours); }}
+          className="py-2 rounded-lg text-white text-sm font-bold disabled:opacity-40"
+          style={{ background: "#0D2440" }}
+        >
+          {saving ? "Adding…" : "Add to schedule"}
+        </button>
+        <button onClick={onCancel} className="py-2 rounded-lg bg-white border border-slate-300 text-slate-600 text-sm font-bold">Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function AddLine({ onAdd, me, initial }) {
   const [f, setF] = useState({
     desc: initial?.desc || "", estParts: initial?.estParts || "",
@@ -2424,12 +2450,14 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
   const [day, setDay] = useState(dateKey(new Date()));
   const [picked, setPicked] = useState(null); // job selected to place: {vId, lineId}
   const [msg, setMsg] = useState(null);
+  const [showAddMisc, setShowAddMisc] = useState(false);
 
   const vehicles = data?.vehicles || [];
 
-  // all approved jobs across the lot
+  // all approved recon jobs across the lot, plus misc (non-recon) service jobs — v is null for misc jobs
   const jobs = [];
   vehicles.forEach((v) => (v.lines || []).forEach((l) => { if (l.status === "approved") jobs.push({ v, l }); }));
+  (data?.miscJobs || []).forEach((l) => jobs.push({ v: null, l }));
   const unscheduled = jobs.filter(({ l }) => !l.sched);
   const todays = jobs.filter(({ l }) => l.sched && l.sched.date === day);
 
@@ -2453,7 +2481,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
 
   const place = async (tech, start) => {
     if (!picked) return;
-    const job = jobs.find(({ v, l }) => v.id === picked.vId && l.id === picked.lineId);
+    const job = jobs.find(({ v, l }) => (v ? v.id : null) === picked.vId && l.id === picked.lineId);
     if (!job) { setPicked(null); return; }
     const hrs = jobHours(job.l);
     if (start + hrs > DAY_END) {
@@ -2465,11 +2493,18 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
       if (occ.has(h)) { setMsg(`${tech} already has a job during that time.`); return; }
     }
     await mutate((d) => {
-      const vv = d.vehicles.find((x) => x.id === picked.vId);
-      const l = vv?.lines?.find((x) => x.id === picked.lineId);
-      if (!l) return d;
-      l.sched = { tech, date: day, start, hours: hrs };
-      notify(d, `${me} scheduled "${l.desc}" (#${vv.stock}) for ${tech} — ${dayLabel}, ${fmtHour(start)}–${fmtHour(start + hrs)}`, vv.id, "stage");
+      if (picked.vId) {
+        const vv = d.vehicles.find((x) => x.id === picked.vId);
+        const l = vv?.lines?.find((x) => x.id === picked.lineId);
+        if (!l) return d;
+        l.sched = { tech, date: day, start, hours: hrs };
+        notify(d, `${me} scheduled "${l.desc}" (#${vv.stock}) for ${tech} — ${dayLabel}, ${fmtHour(start)}–${fmtHour(start + hrs)}`, vv.id, "stage");
+      } else {
+        const l = (d.miscJobs || []).find((x) => x.id === picked.lineId);
+        if (!l) return d;
+        l.sched = { tech, date: day, start, hours: hrs };
+        notify(d, `${me} scheduled "${l.desc}" for ${tech} — ${dayLabel}, ${fmtHour(start)}–${fmtHour(start + hrs)}`, null, "stage");
+      }
       return d;
     });
     setPicked(null);
@@ -2478,11 +2513,27 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
 
   const unschedule = async (vId, lineId) => {
     await mutate((d) => {
-      const vv = d.vehicles.find((x) => x.id === vId);
-      const l = vv?.lines?.find((x) => x.id === lineId);
-      if (!l || !l.sched) return d;
-      notify(d, `${me} removed "${l.desc}" (#${vv.stock}) from ${l.sched.tech}'s schedule`, vv.id, "info");
-      delete l.sched;
+      if (vId) {
+        const vv = d.vehicles.find((x) => x.id === vId);
+        const l = vv?.lines?.find((x) => x.id === lineId);
+        if (!l || !l.sched) return d;
+        notify(d, `${me} removed "${l.desc}" (#${vv.stock}) from ${l.sched.tech}'s schedule`, vv.id, "info");
+        delete l.sched;
+      } else {
+        const l = (d.miscJobs || []).find((x) => x.id === lineId);
+        if (!l || !l.sched) return d;
+        notify(d, `${me} removed "${l.desc}" from ${l.sched.tech}'s schedule`, null, "info");
+        delete l.sched;
+      }
+      return d;
+    });
+  };
+
+  const addMiscJob = async (desc, hours) => {
+    await mutate((d) => {
+      d.miscJobs = d.miscJobs || [];
+      d.miscJobs.push({ id: uid(), desc, status: "misc", estLaborHours: hours, addedBy: me, ts: Date.now(), sched: null });
+      notify(d, `${me} added misc job "${desc}" to the schedule`, null, "info");
       return d;
     });
   };
@@ -2519,7 +2570,13 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
         <div className="flex items-center gap-2 mb-1.5">
           <span className="text-[11px] font-display font-bold uppercase tracking-widest text-slate-400">To schedule ({unscheduled.length})</span>
           <div className="flex-1 h-px bg-slate-200" />
+          <button onClick={() => setShowAddMisc(!showAddMisc)} className="text-[11px] font-bold text-sky-600 flex items-center gap-1">
+            <Plus className="w-3.5 h-3.5" /> Misc job
+          </button>
         </div>
+
+        {showAddMisc && <AddMiscJob onAdd={async (desc, hours) => { await addMiscJob(desc, hours); setShowAddMisc(false); }} onCancel={() => setShowAddMisc(false)} />}
+
         {unscheduled.length === 0 ? (
           <p className="text-xs text-slate-400">Every approved job is on the calendar.</p>
         ) : (
@@ -2529,13 +2586,13 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
               return (
                 <button
                   key={l.id}
-                  onClick={() => { setPicked(sel ? null : { vId: v.id, lineId: l.id }); setMsg(null); }}
+                  onClick={() => { setPicked(sel ? null : { vId: v ? v.id : null, lineId: l.id }); setMsg(null); }}
                   className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border text-left ${
                     sel ? "text-white border-transparent" : "bg-white border-slate-300 text-slate-700"
                   }`}
                   style={sel ? { background: "#3B8CDE" } : undefined}
                 >
-                  #{v.stock} · {l.desc} · {jobHours(l)}h
+                  {v ? `#${v.stock} · ` : ""}{l.desc} · {jobHours(l)}h
                 </button>
               );
             })}
@@ -2575,12 +2632,16 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                   <div key={t} className="border-b border-l border-slate-100 px-1 py-0.5" style={{ background: "rgba(59,140,222,0.10)" }}>
                     {isStart && (
                       <div className="rounded-md px-1.5 py-1 text-white" style={{ background: "#0D2440" }}>
-                        <button onClick={() => onOpen(job.v.id)} className="block w-full text-left text-[10px] font-bold leading-tight truncate">
-                          #{job.v.stock} {job.l.desc}
-                        </button>
+                        {job.v ? (
+                          <button onClick={() => onOpen(job.v.id)} className="block w-full text-left text-[10px] font-bold leading-tight truncate">
+                            #{job.v.stock} {job.l.desc}
+                          </button>
+                        ) : (
+                          <p className="text-[10px] font-bold leading-tight truncate">{job.l.desc}</p>
+                        )}
                         <div className="flex items-center justify-between">
-                          <span className="text-[9px] text-sky-300">{job.l.sched.hours}h · {money(lineEst(job.l))} est</span>
-                          <button onClick={() => unschedule(job.v.id, job.l.id)} className="text-[9px] font-bold text-red-300 underline">remove</button>
+                          <span className="text-[9px] text-sky-300">{job.l.sched.hours}h{job.v ? ` · ${money(lineEst(job.l))} est` : ""}</span>
+                          <button onClick={() => unschedule(job.v ? job.v.id : null, job.l.id)} className="text-[9px] font-bold text-red-300 underline">remove</button>
                         </div>
                       </div>
                     )}

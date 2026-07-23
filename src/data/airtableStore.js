@@ -22,7 +22,7 @@ import {
 } from './schema.js';
 
 const LOCAL_FALLBACK_KEY = 'freebird-recon-airtable-fallback-v1';
-const emptyDataShape = () => ({ vehicles: [], notifications: [], laborRate: 100 });
+const emptyDataShape = () => ({ vehicles: [], notifications: [], miscJobs: [], laborRate: 100 });
 const clone = (obj) => JSON.parse(JSON.stringify(obj));
 
 export let storageMode = 'memory';
@@ -67,16 +67,22 @@ async function loadAll() {
 
   const linesById = new Map();
   const lineRecIdToAppId = new Map();
+  const miscJobs = [];
   lineRecs.forEach((rec) => {
     const l = fieldsToLine(rec);
     if (!l.id) return;
-    linesById.set(l.id, l);
-    recIds.lines.set(l.id, rec.id);
     lineRecIdToAppId.set(rec.id, l.id);
+    recIds.lines.set(l.id, rec.id);
     const vehId = vehicleRecIdToAppId.get(l._vehicleRecId);
     delete l._vehicleRecId;
     const v = vehId && vehiclesById.get(vehId);
-    if (v) v.lines.push(l);
+    if (v) {
+      linesById.set(l.id, l);
+      v.lines.push(l);
+    } else {
+      // no Vehicle link — this is a misc (non-recon) scheduled job, not a repair line
+      miscJobs.push(l);
+    }
   });
 
   // Labor Logs holds two kinds of rows in one table: job-specific (linked to a
@@ -140,8 +146,9 @@ async function loadAll() {
     l.estEdits.sort((a, b) => (a.ts || 0) - (b.ts || 0));
   });
   notifications.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+  miscJobs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
 
-  const data = { vehicles, notifications, laborRate };
+  const data = { vehicles, notifications, miscJobs, laborRate };
   lastSynced = clone(data);
   return data;
 }
@@ -194,8 +201,18 @@ async function persistToAirtable(nextData) {
   // Vehicles first — lines/activity need the resulting Airtable record ids to link to.
   await syncEntity(TABLES.vehicles, recIds.vehicles, prev.vehicles, nextData.vehicles, vehicleToFields);
 
-  const prevLines = prev.vehicles.flatMap((v) => (v.lines || []).map((l) => ({ ...l, _vehId: v.id })));
-  const nextLines = nextData.vehicles.flatMap((v) => (v.lines || []).map((l) => ({ ...l, _vehId: v.id })));
+  // Misc (non-recon) scheduled jobs live in the same Repair Lines table as
+  // regular repair lines, just with no Vehicle link — combine both here so a
+  // job moving between "has a vehicle" and "doesn't" (shouldn't normally
+  // happen, but keeps the sync correct either way) is handled by one diff.
+  const prevLines = [
+    ...prev.vehicles.flatMap((v) => (v.lines || []).map((l) => ({ ...l, _vehId: v.id }))),
+    ...(prev.miscJobs || []).map((l) => ({ ...l, _vehId: null })),
+  ];
+  const nextLines = [
+    ...nextData.vehicles.flatMap((v) => (v.lines || []).map((l) => ({ ...l, _vehId: v.id }))),
+    ...(nextData.miscJobs || []).map((l) => ({ ...l, _vehId: null })),
+  ];
   await syncEntity(
     TABLES.lines, recIds.lines, prevLines, nextLines,
     (l) => lineToFields(l, recIds.vehicles.get(l._vehId))
@@ -309,16 +326,15 @@ export async function tryRead() {
 
 export async function persist(data) {
   if (storageMode === 'memory') return false;
-  try {
-    if (storageMode === 'personal') {
-      writeLocalFallback(data);
-      lastSynced = clone(data);
-      return true;
-    }
-    await persistToAirtable(data);
+  if (storageMode === 'personal') {
+    writeLocalFallback(data);
+    lastSynced = clone(data);
     return true;
-  } catch (e) {
-    console.error('save failed', e);
-    return false;
   }
+  // Let Airtable failures propagate — the caller (mutate() in App.jsx) surfaces
+  // them in the error banner. The local optimistic update already happened by
+  // the time this runs, so a save failure here means "this didn't reach the
+  // shared database," which the user needs to see, not a silently swallowed error.
+  await persistToAirtable(data);
+  return true;
 }
