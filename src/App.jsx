@@ -92,6 +92,12 @@ const linePartsCost = (l) =>
   : Number(l.estParts)) || 0;
 // pre-approval estimate: parts $ + labor hours × this line's rate
 const lineEst = (l) => (Number(l.estParts) || 0) + (Number(l.estLaborHours) || 0) * (Number(l.estLaborRate) || 0);
+// what to actually call this job: a custom label if someone set one, else the
+// specific problem noted (e.g. "rough idle"), else the raw checklist item text
+// (which for a fail reads like a pass condition — "Engine starts & idles
+// smooth" — so it's the least useful of the three, only a last resort)
+const jobTitle = (l) => l.jobLabel || l.note || l.desc;
+const vehicleLabel = (v) => v ? `${v.year} ${v.make} ${v.model} · #${v.stock}` : "";
 
 const emptyData = { vehicles: [], notifications: [], miscJobs: [] };
 
@@ -1500,9 +1506,9 @@ function LineRow({ l, me, onActual, onParts, onClock, onSupplement, onEditEst, o
     <div className={`p-3 rounded-lg border ${l.status === "declined" ? "border-slate-200 opacity-60" : "border-slate-200"} bg-white`}>
       <div className="flex items-start justify-between gap-2">
         <div>
-          <p className="text-sm font-semibold text-slate-800">{l.desc}</p>
+          <p className="text-sm font-semibold text-slate-800">{l.jobLabel || l.desc}</p>
           <p className="text-[11px] text-slate-400">
-            {l.source === "inspection" ? "From inspection" : `Added by ${l.addedBy}`}{l.note ? ` — ${l.note}` : ""}
+            {l.jobLabel ? l.desc : (l.source === "inspection" ? "From inspection" : `Added by ${l.addedBy}`)}{l.note ? ` — ${l.note}` : ""}
           </p>
         </div>
         <span className={`shrink-0 text-[10px] font-bold px-2 py-1 rounded-md ${badge[0]}`}>{badge[1]}</span>
@@ -1907,7 +1913,7 @@ function Approvals({ data, me, mutate, notify, onOpen }) {
             <button onClick={() => onOpen(v.id)} className="text-xs font-bold text-sky-600">
               #{v.stock} · {v.year} {v.make} {v.model}
             </button>
-            <p className="mt-1 font-semibold text-slate-800 text-sm">{l.desc}</p>
+            <p className="mt-1 font-semibold text-slate-800 text-sm">{l.desc}{l.jobLabel ? ` — ${l.jobLabel}` : ""}</p>
             {l.note && <p className="text-xs text-slate-500 mt-0.5">{l.note}</p>}
             <p className="text-xs text-slate-500 mt-1">
               Est. <span className="font-bold text-slate-700">{money(lineEst(l))}</span>
@@ -2507,6 +2513,8 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
   const [picked, setPicked] = useState(null); // job selected to place: {vId, lineId}
   const [msg, setMsg] = useState(null);
   const [showAddMisc, setShowAddMisc] = useState(false);
+  const [editingLabel, setEditingLabel] = useState(null); // lineId whose custom label is being edited
+  const [labelDraft, setLabelDraft] = useState("");
 
   const vehicles = data?.vehicles || [];
 
@@ -2594,6 +2602,17 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
     });
   };
 
+  const setJobLabel = async (vId, lineId, label) => {
+    await mutate((d) => {
+      const l = vId
+        ? d.vehicles.find((x) => x.id === vId)?.lines?.find((x) => x.id === lineId)
+        : (d.miscJobs || []).find((x) => x.id === lineId);
+      if (!l) return d;
+      l.jobLabel = label;
+      return d;
+    });
+  };
+
   const hours = [];
   for (let h = DAY_START; h < DAY_END; h++) hours.push(h);
 
@@ -2636,20 +2655,54 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
         {unscheduled.length === 0 ? (
           <p className="text-xs text-slate-400">Every approved job is on the calendar.</p>
         ) : (
-          <div className="flex flex-wrap gap-1.5">
+          <div className="space-y-1.5">
             {unscheduled.map(({ v, l }) => {
               const sel = picked && picked.lineId === l.id;
+              const vId = v ? v.id : null;
               return (
-                <button
-                  key={l.id}
-                  onClick={() => { setPicked(sel ? null : { vId: v ? v.id : null, lineId: l.id }); setMsg(null); }}
-                  className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border text-left ${
-                    sel ? "text-white border-transparent" : "bg-white border-slate-300 text-slate-700"
-                  }`}
-                  style={sel ? { background: "#3B8CDE" } : undefined}
-                >
-                  {v ? `#${v.stock} · ` : ""}{l.desc} · {jobHours(l)}h
-                </button>
+                <div key={l.id} className={`rounded-lg border overflow-hidden ${sel ? "border-sky-400" : "border-slate-200"}`}>
+                  <button
+                    onClick={() => { setPicked(sel ? null : { vId, lineId: l.id }); setMsg(null); }}
+                    className={`w-full text-left px-2.5 py-2 ${sel ? "text-white" : "bg-white text-slate-700"}`}
+                    style={sel ? { background: "#3B8CDE" } : undefined}
+                  >
+                    <div className={`text-[10px] font-bold uppercase tracking-wide ${sel ? "text-sky-100" : "text-slate-400"}`}>
+                      {v ? vehicleLabel(v) : "Misc job"}
+                    </div>
+                    <div className="flex items-center justify-between gap-2 mt-0.5">
+                      <span className="text-[12px] font-bold truncate">{jobTitle(l)}</span>
+                      <span className={`shrink-0 text-[11px] font-bold ${sel ? "text-sky-100" : "text-slate-400"}`}>{jobHours(l)}h</span>
+                    </div>
+                  </button>
+                  {editingLabel === l.id ? (
+                    <div className="p-2 border-t border-slate-100 bg-slate-50 flex gap-1.5">
+                      <input
+                        value={labelDraft}
+                        onChange={(e) => setLabelDraft(e.target.value)}
+                        placeholder="Custom job name…"
+                        autoFocus
+                        className="flex-1 rounded border border-slate-300 bg-white px-2 py-1 text-xs"
+                      />
+                      <button
+                        onClick={async () => { await setJobLabel(vId, l.id, labelDraft.trim()); setEditingLabel(null); }}
+                        className="px-2.5 py-1 rounded text-white text-[11px] font-bold"
+                        style={{ background: "#0D2440" }}
+                      >
+                        Save
+                      </button>
+                      <button onClick={() => setEditingLabel(null)} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 text-[11px] font-bold">
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => { setEditingLabel(l.id); setLabelDraft(l.jobLabel || ""); }}
+                      className="w-full text-left px-2.5 py-1 border-t border-slate-100 bg-slate-50 text-[10px] font-bold text-sky-600 flex items-center gap-1"
+                    >
+                      <Pencil className="w-3 h-3" /> {l.jobLabel ? "Rename job" : "Give this job a clearer name"}
+                    </button>
+                  )}
+                </div>
               );
             })}
           </div>
@@ -2688,12 +2741,13 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                   <div key={t} className="border-b border-l border-slate-100 px-1 py-0.5" style={{ background: "rgba(59,140,222,0.10)" }}>
                     {isStart && (
                       <div className="rounded-md px-1.5 py-1 text-white" style={{ background: "#0D2440" }}>
+                        {job.v && <p className="text-[9px] text-sky-300 leading-tight truncate">{vehicleLabel(job.v)}</p>}
                         {job.v ? (
                           <button onClick={() => onOpen(job.v.id)} className="block w-full text-left text-[10px] font-bold leading-tight truncate">
-                            #{job.v.stock} {job.l.desc}
+                            {jobTitle(job.l)}
                           </button>
                         ) : (
-                          <p className="text-[10px] font-bold leading-tight truncate">{job.l.desc}</p>
+                          <p className="text-[10px] font-bold leading-tight truncate">{jobTitle(job.l)}</p>
                         )}
                         <div className="flex items-center justify-between">
                           <span className="text-[9px] text-sky-300">{job.l.sched.hours}h{job.v ? ` · ${money(lineEst(job.l))} est` : ""}</span>
