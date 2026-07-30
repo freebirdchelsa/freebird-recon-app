@@ -155,25 +155,36 @@ async function loadAll() {
 
 /* ---------- diff & sync ---------- */
 
-function diffById(prevList, nextList, toFields) {
+// Whether something is a create is decided by recMap (do we already know its
+// Airtable record id?), never by whether it was in the last-known snapshot.
+// lastSynced can go stale after a failed save (e.g. a schema error partway
+// through a multi-table sync) — if "create" were decided from that stale
+// snapshot, an item that already has a real Airtable record would look new
+// again on the next save and get created a second time, leaving a duplicate
+// record behind. recMap only grows on an actual successful create or a fresh
+// load, so it can't go stale in that direction.
+function diffById(recMap, prevList, nextList, toFields) {
   const prevMap = new Map(prevList.map((x) => [x.id, x]));
   const nextMap = new Map(nextList.map((x) => [x.id, x]));
   const creates = [];
   const updates = [];
   const deletes = [];
   for (const [id, item] of nextMap) {
+    if (!recMap.has(id)) {
+      creates.push(item);
+      continue;
+    }
     const before = prevMap.get(id);
-    if (!before) creates.push(item);
-    else if (JSON.stringify(toFields(before)) !== JSON.stringify(toFields(item))) updates.push(item);
+    if (!before || JSON.stringify(toFields(before)) !== JSON.stringify(toFields(item))) updates.push(item);
   }
   for (const [id] of prevMap) {
-    if (!nextMap.has(id)) deletes.push(id);
+    if (!nextMap.has(id) && recMap.has(id)) deletes.push(id);
   }
   return { creates, updates, deletes };
 }
 
 async function syncEntity(table, recMap, prevList, nextList, toFields, { allowDelete = true } = {}) {
-  const { creates, updates, deletes } = diffById(prevList, nextList, toFields);
+  const { creates, updates, deletes } = diffById(recMap, prevList, nextList, toFields);
 
   if (creates.length) {
     const created = await createRecords(table, creates.map(toFields));
@@ -234,9 +245,10 @@ async function persistToAirtable(nextData) {
   );
 
   // Estimate edits are an append-only audit trail — never update or delete them.
-  const prevEdits = prevLines.flatMap((l) => (l.estEdits || []).map((e) => ({ ...e, _lineId: l.id })));
+  // Whether one is "new" is decided by recIds.edits (same reasoning as diffById
+  // above), not by the possibly-stale prevLines snapshot.
   const nextEdits = nextLines.flatMap((l) => (l.estEdits || []).map((e) => ({ ...e, _lineId: l.id })));
-  const editsCreated = nextEdits.filter((e) => !prevEdits.some((p) => p.id === e.id));
+  const editsCreated = nextEdits.filter((e) => !recIds.edits.has(e.id));
   if (editsCreated.length) {
     const created = await createRecords(
       TABLES.estEdits,
@@ -250,9 +262,9 @@ async function persistToAirtable(nextData) {
 
   // Activity is also append-only: the client caps its in-memory list at 200 for
   // display, but that must never be read as "delete the older ones" — so this
-  // only ever creates new notifications, never updates or deletes.
-  const prevNotifIds = new Set(prev.notifications.map((n) => n.id));
-  const newNotifs = nextData.notifications.filter((n) => !prevNotifIds.has(n.id));
+  // only ever creates new notifications, never updates or deletes. "New" is
+  // decided by recIds.activity, not the possibly-stale prev snapshot.
+  const newNotifs = nextData.notifications.filter((n) => !recIds.activity.has(n.id));
   if (newNotifs.length) {
     const created = await createRecords(
       TABLES.activity,
