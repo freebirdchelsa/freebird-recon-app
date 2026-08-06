@@ -368,13 +368,17 @@ function Main() {
               if (!v) return d;
               v.inspection = { by: me, ts: Date.now(), results, notes: generalNotes || "" };
               v.lines = [...(v.lines || []), ...lines];
-              if (v.stage === "intake" || v.stage === "inspection") v.stage = lines.length ? "approval" : "parts";
-              const fails = lines.length;
+              const pendingCount = lines.filter((l) => l.status === "pending").length;
+              const quickCount = lines.length - pendingCount;
+              if (v.stage === "intake" || v.stage === "inspection") v.stage = pendingCount ? "approval" : "parts";
+              const parts = [];
+              if (pendingCount) parts.push(`${pendingCount} item${pendingCount > 1 ? "s" : ""} need approval`);
+              if (quickCount) parts.push(`${quickCount} quick job${quickCount > 1 ? "s" : ""} auto-approved`);
               notify(
                 d,
-                `${me} completed inspection on #${v.stock} — ${fails ? `${fails} item${fails > 1 ? "s" : ""} need approval` : "no repairs needed"}`,
+                `${me} completed inspection on #${v.stock} — ${parts.length ? parts.join(", ") : "no repairs needed"}`,
                 v.id,
-                fails ? "approval" : "stage"
+                pendingCount ? "approval" : "stage"
               );
               return d;
             });
@@ -1140,7 +1144,14 @@ function VehicleDetail({ data, id, me, mutate, notify, onBack, onInspect, onFina
                 const vv = d.vehicles.find((x) => x.id === id);
                 if (!vv) return d;
                 vv.lines = [...(vv.lines || []), line];
-                notify(d, `${me} requested "${line.desc}" on #${vv.stock} — needs approval (${money(lineEst(line))} est.)`, id, "approval");
+                notify(
+                  d,
+                  line.quick
+                    ? `${me} added quick job "${line.desc}" on #${vv.stock} — no approval needed`
+                    : `${me} requested "${line.desc}" on #${vv.stock} — needs approval (${money(lineEst(line))} est.)`,
+                  id,
+                  line.quick ? "info" : "approval"
+                );
                 return d;
               });
               setShowAddLine(false);
@@ -1473,9 +1484,15 @@ function AddLine({ onAdd, me, initial }) {
     estLaborHours: initial?.estLaborHours || "", estLaborRate: initial?.estLaborRate || "",
   });
   const [partsOnly, setPartsOnly] = useState(false);
+  const [quick, setQuick] = useState(false);
   const [saving, setSaving] = useState(false);
-  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const set = (k) => (e) => {
+    const val = e.target.value;
+    if ((k === "estParts" || k === "estLaborHours") && val) setQuick(false);
+    setF({ ...f, [k]: val });
+  };
   const ok = f.desc && (partsOnly || (f.estLaborHours === "" || f.estLaborRate));
+  const noCost = !f.estParts && !f.estLaborHours;
   return (
     <div className="mt-2 p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2">
       <Field label="Description" value={f.desc} onChange={set("desc")} placeholder="Front brake pads & rotors" />
@@ -1490,22 +1507,37 @@ function AddLine({ onAdd, me, initial }) {
       {!partsOnly && (
         <Field label="Labor rate $/hr for this job" value={f.estLaborRate} onChange={set("estLaborRate")} inputMode="decimal" placeholder="100" />
       )}
+      <label className={`flex items-center gap-2 text-xs font-semibold ${noCost ? "text-slate-600 cursor-pointer" : "text-slate-300"}`}>
+        <input
+          type="checkbox"
+          checked={quick}
+          disabled={!noCost}
+          onChange={(e) => setQuick(e.target.checked)}
+          className="w-4 h-4 accent-emerald-600"
+        />
+        Quick job — skip approval (only for $0 items)
+      </label>
       <button
         disabled={!ok || saving}
         onClick={() => {
           if (saving || !ok) return;
           setSaving(true);
+          const isQuick = quick && noCost;
+          const ts = Date.now();
           onAdd({
             id: uid(), desc: f.desc, estParts: f.estParts,
             estLaborHours: partsOnly ? "" : f.estLaborHours,
             estLaborRate: partsOnly ? "" : f.estLaborRate,
-            actualParts: "", actualLabor: "", status: "pending", addedBy: me, ts: Date.now(), source: "manual",
+            actualParts: "", actualLabor: "", quick: isQuick,
+            status: isQuick ? "approved" : "pending", addedBy: me, ts,
+            decidedBy: isQuick ? me : "", decidedTs: isQuick ? ts : null,
+            source: "manual",
           });
         }}
         className="w-full py-2 rounded-lg text-white text-sm font-bold disabled:opacity-40"
         style={{ background: "#0D2440" }}
       >
-        {saving ? "Adding…" : "Add for approval"}
+        {saving ? "Adding…" : "Add"}
       </button>
     </div>
   );
@@ -1519,7 +1551,7 @@ function LineRow({ l, me, onActual, onParts, onClock, onSupplement, onEditEst, o
   const [confirmDelete, setConfirmDelete] = useState(false);
   const badge = {
     pending: ["bg-amber-100 text-amber-700", "Pending approval"],
-    approved: ["bg-emerald-100 text-emerald-700", `Approved${l.decidedBy ? " · " + l.decidedBy : ""}`],
+    approved: ["bg-emerald-100 text-emerald-700", l.quick ? "Quick job — no approval needed" : `Approved${l.decidedBy ? " · " + l.decidedBy : ""}`],
     declined: ["bg-slate-200 text-slate-500", `Declined${l.decidedBy ? " · " + l.decidedBy : ""}`],
   }[l.status] || ["bg-slate-100 text-slate-500", l.status];
 
@@ -1754,9 +1786,14 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
 
   const setStatus = (key, status) => {
     setResults({ ...results, [key]: { status } });
-    if (status === "fail" && !fails[key]) setFails({ ...fails, [key]: { note: "", estParts: "", estLaborHours: "", estLaborRate: "" } });
+    if (status === "fail" && !fails[key]) setFails({ ...fails, [key]: { note: "", estParts: "", estLaborHours: "", estLaborRate: "", quick: false } });
   };
-  const setFail = (key, field, val) => setFails({ ...fails, [key]: { ...fails[key], [field]: val } });
+  const setFail = (key, field, val) => {
+    const next = { ...fails[key], [field]: val };
+    // a quick (skip-approval) job can't carry a cost — uncheck it the moment either field gets a value
+    if ((field === "estParts" || field === "estLaborHours") && val) next.quick = false;
+    setFails({ ...fails, [key]: next });
+  };
   const setVendor = (service, field, val) => setVendorItems({ ...vendorItems, [service]: { ...vendorItems[service], [field]: val } });
   const toggleVendor = (service) => setVendor(service, "needed", !vendorItems[service]?.needed);
 
@@ -1767,11 +1804,15 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
       .filter(([, r]) => r.status === "fail")
       .map(([key]) => {
         const f = fails[key] || {};
+        const isQuick = !!f.quick && !f.estParts && !f.estLaborHours;
+        const ts = Date.now();
         return {
           id: uid(), desc: key.split("||")[1], note: f.note || "",
           estParts: f.estParts || "", estLaborHours: f.estLaborHours || "", estLaborRate: f.estLaborRate || "",
-          actualParts: "", actualLabor: "",
-          status: "pending", addedBy: me, ts: Date.now(), source: "inspection",
+          actualParts: "", actualLabor: "", quick: isQuick,
+          status: isQuick ? "approved" : "pending", addedBy: me, ts,
+          decidedBy: isQuick ? me : "", decidedTs: isQuick ? ts : null,
+          source: "inspection",
         };
       });
     const vendorLines = VENDOR_SERVICES.filter((s) => vendorItems[s]?.needed).map((s) => ({
@@ -1855,6 +1896,16 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
                           className="rounded border border-red-200 bg-white px-2 py-1.5 text-xs"
                         />
                       </div>
+                      <label className={`flex items-center gap-2 text-xs font-semibold ${(fails[key]?.estParts || fails[key]?.estLaborHours) ? "text-slate-300" : "text-slate-600 cursor-pointer"}`}>
+                        <input
+                          type="checkbox"
+                          checked={!!fails[key]?.quick}
+                          disabled={!!(fails[key]?.estParts || fails[key]?.estLaborHours)}
+                          onChange={(e) => setFail(key, "quick", e.target.checked)}
+                          className="w-4 h-4 accent-emerald-600"
+                        />
+                        Quick job — skip approval (only for $0 items)
+                      </label>
                     </div>
                   )}
                 </div>
@@ -2641,7 +2692,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
 
   // all approved recon jobs across the lot, plus misc (non-recon) service jobs — v is null for misc jobs
   const jobs = [];
-  vehicles.forEach((v) => (v.lines || []).forEach((l) => { if (l.status === "approved") jobs.push({ v, l }); }));
+  vehicles.forEach((v) => (v.lines || []).forEach((l) => { if (l.status === "approved" && !l.quick) jobs.push({ v, l }); }));
   (data?.miscJobs || []).forEach((l) => jobs.push({ v: null, l }));
   const unscheduled = jobs.filter(({ l }) => !l.sched);
   const todays = jobs.filter(({ l }) => l.sched && l.sched.date === day);
