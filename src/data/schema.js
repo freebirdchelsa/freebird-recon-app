@@ -9,6 +9,7 @@ export const TABLES = {
   estEdits: 'Estimate Edits',
   activity: 'Activity',
   settings: 'Settings',
+  serviceTickets: 'Service Tickets',
 };
 
 export const numOrNull = (v) => {
@@ -268,5 +269,64 @@ export function fieldsToActivity(rec) {
     type: f['Type'] || 'info',
     by: f['By'] || '',
     _vehicleRecId: (f['Vehicle'] || [])[0] || null,
+  };
+}
+
+/* ---------- service tickets (non-recon customer vehicles) ---------- */
+
+export function ticketToFields(t) {
+  return {
+    'App Id': t.id,
+    Warranty: !!t.warranty,
+    'Customer Name': t.customerName || '',
+    'Customer Contact': t.customerContact || '',
+    Year: numOrNull(t.year),
+    Make: t.make || '',
+    Model: t.model || '',
+    Complaint: t.complaint || '',
+    Failure: t.failure || '',
+    'Recommended Work': t.recommendedWork || '',
+    'Est Cost': numOrNull(t.estCost),
+    'Est Labor Hours': numOrNull(t.estLaborHours),
+    'Alldata Built': !!t.alldataBuilt,
+    'Customer Approved': !!t.customerApproved,
+    'Approved By': t.approvedBy || '',
+    'Approved Ts': t.approvedTs ?? null,
+    Complete: !!t.complete,
+    'Sched Tech': t.sched?.tech || '',
+    'Sched Date': t.sched?.date || null,
+    'Sched Start': t.sched?.start ?? null,
+    'Sched Hours': t.sched?.hours ?? null,
+    'Added By': t.addedBy || '',
+    Ts: t.ts ?? null,
+  };
+}
+
+export function fieldsToTicket(rec) {
+  const f = rec.fields;
+  const sched = f['Sched Tech']
+    ? { tech: f['Sched Tech'], date: f['Sched Date'] || '', start: f['Sched Start'] ?? 0, hours: f['Sched Hours'] ?? 0 }
+    : null;
+  return {
+    id: f['App Id'],
+    warranty: !!f['Warranty'],
+    customerName: f['Customer Name'] || '',
+    customerContact: f['Customer Contact'] || '',
+    year: f['Year'] ?? '',
+    make: f['Make'] || '',
+    model: f['Model'] || '',
+    complaint: f['Complaint'] || '',
+    failure: f['Failure'] || '',
+    recommendedWork: f['Recommended Work'] || '',
+    estCost: f['Est Cost'] ?? '',
+    estLaborHours: f['Est Labor Hours'] ?? '',
+    alldataBuilt: !!f['Alldata Built'],
+    customerApproved: !!f['Customer Approved'],
+    approvedBy: f['Approved By'] || '',
+    approvedTs: f['Approved Ts'] ?? null,
+    complete: !!f['Complete'],
+    sched,
+    addedBy: f['Added By'] || '',
+    ts: f['Ts'] ?? Date.now(),
   };
 }

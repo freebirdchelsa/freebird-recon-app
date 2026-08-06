@@ -102,7 +102,7 @@ const lineEst = (l) => (Number(l.estParts) || 0) + (Number(l.estLaborHours) || 0
 // (which for a fail reads like a pass condition — "Engine starts & idles
 // smooth" — so it's the least useful of the three, only a last resort)
 const jobTitle = (l) => l.jobLabel || l.note || l.desc;
-const vehicleLabel = (v) => v ? `${v.year} ${v.make} ${v.model} · #${v.stock}` : "";
+const vehicleLabel = (v) => v ? `${v.year} ${v.make} ${v.model}${v.stock ? ` · #${v.stock}` : ""}` : "";
 
 const emptyData = { vehicles: [], notifications: [], miscJobs: [] };
 
@@ -297,11 +297,11 @@ function Main() {
       )}
 
       <div className="flex border-b border-slate-200 bg-white sticky top-[60px] z-10">
-        {[["board", "Board"], ["dashboard", "Dashboard"], ["labor", "Labor"], ["schedule", "Schedule"]].map(([tid, label]) => (
+        {[["board", "Recon"], ["service", "Service"], ["dashboard", "Dashboard"], ["labor", "Labor"], ["schedule", "Schedule"]].map(([tid, label]) => (
           <button
             key={tid}
             onClick={() => setView({ name: tid })}
-            className={`flex-1 py-2.5 text-xs font-display font-bold uppercase tracking-wide ${
+            className={`flex-1 py-2.5 text-[10px] font-display font-bold uppercase tracking-wide ${
               view.name === tid ? "text-slate-900 border-b-2" : "text-slate-400"
             }`}
             style={view.name === tid ? { borderColor: "#3B8CDE" } : undefined}
@@ -313,6 +313,10 @@ function Main() {
 
       {view.name === "board" && (
         <Board data={data} onOpen={goVehicle} onAdd={() => setView({ name: "add" })} />
+      )}
+
+      {view.name === "service" && (
+        <ServicePage data={data} me={me} mutate={mutate} notify={notify} />
       )}
 
       {view.name === "add" && (
@@ -614,6 +618,272 @@ function VehicleCard({ v, onOpen, done }) {
         {v.inspection && <span className="flex items-center gap-1 text-emerald-600"><ClipboardCheck className="w-3 h-3" />inspected</span>}
       </div>
     </button>
+  );
+}
+
+/* ---------- service (non-recon customer vehicles) ---------- */
+
+const ticketStatus = (t) => {
+  if (t.complete) return "complete";
+  if (t.sched) return "scheduled";
+  if (t.customerApproved) return "approved";
+  if (t.alldataBuilt) return "awaiting_approval";
+  return "new";
+};
+const TICKET_STATUS_LABEL = {
+  new: ["Needs ticket built in AllData", "bg-slate-100 text-slate-600"],
+  awaiting_approval: ["Awaiting customer approval", "bg-amber-100 text-amber-700"],
+  approved: ["Approved — ready to schedule", "bg-emerald-100 text-emerald-700"],
+  scheduled: ["Scheduled", "bg-sky-100 text-sky-700"],
+  complete: ["Complete", "bg-slate-200 text-slate-500"],
+};
+
+function ServicePage({ data, me, mutate, notify }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const tickets = data?.serviceTickets || [];
+  const active = tickets.filter((t) => !t.complete);
+  const complete = tickets.filter((t) => t.complete);
+
+  const addTicket = async (fields) => {
+    await mutate((d) => {
+      d.serviceTickets = d.serviceTickets || [];
+      const t = {
+        id: uid(), ...fields,
+        alldataBuilt: false, customerApproved: false, approvedBy: "", approvedTs: null,
+        complete: false, sched: null, addedBy: me, ts: Date.now(),
+      };
+      d.serviceTickets.push(t);
+      notify(d, `${me} added a service ticket for ${fields.customerName} — ${fields.year} ${fields.make} ${fields.model}`, null, "info");
+      return d;
+    });
+    setShowAdd(false);
+  };
+
+  const updateTicket = async (id, patch, message) => {
+    await mutate((d) => {
+      const t = (d.serviceTickets || []).find((x) => x.id === id);
+      if (!t) return d;
+      Object.assign(t, patch);
+      if (message) notify(d, message, null, "info");
+      return d;
+    });
+  };
+
+  const deleteTicket = async (id) => {
+    await mutate((d) => {
+      const t = (d.serviceTickets || []).find((x) => x.id === id);
+      if (!t) return d;
+      d.serviceTickets = (d.serviceTickets || []).filter((x) => x.id !== id);
+      notify(d, `${me} deleted the service ticket for ${t.customerName} (${t.year} ${t.make} ${t.model})`, null, "info");
+      return d;
+    });
+  };
+
+  return (
+    <div className="flex-1 p-4 pb-24">
+      <div className="flex items-baseline justify-between mb-1">
+        <h2 className="font-display font-bold text-lg text-slate-800">Service ({active.length})</h2>
+      </div>
+      <p className="text-xs text-slate-500 mb-3">Customer vehicles in for service — not part of recon.</p>
+
+      {showAdd && <AddServiceTicket onAdd={addTicket} onCancel={() => setShowAdd(false)} />}
+
+      {!showAdd && active.length === 0 && (
+        <div className="p-8 rounded-xl border-2 border-dashed border-slate-300 text-center">
+          <Wrench className="w-8 h-8 mx-auto text-slate-300 mb-2" />
+          <p className="text-slate-500 text-sm">No service vehicles right now.</p>
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {active.map((t) => (
+          <ServiceTicketCard key={t.id} t={t} me={me} onUpdate={updateTicket} onDelete={deleteTicket} />
+        ))}
+      </div>
+
+      {complete.length > 0 && (
+        <div className="mt-6">
+          <div className="flex items-center gap-2 mb-2">
+            <span className="text-[11px] font-display font-bold uppercase tracking-widest text-slate-400">Complete ({complete.length})</span>
+            <div className="flex-1 h-px bg-slate-200" />
+          </div>
+          <div className="space-y-2">
+            {complete.map((t) => (
+              <ServiceTicketCard key={t.id} t={t} me={me} onUpdate={updateTicket} onDelete={deleteTicket} compact />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {!showAdd && (
+        <button
+          onClick={() => setShowAdd(true)}
+          className="fixed bottom-5 right-5 md:right-[calc(50%-24rem+1.25rem)] flex items-center gap-2 px-5 py-3.5 rounded-full text-white font-display font-bold shadow-lg z-30"
+          style={{ background: "#3B8CDE" }}
+        >
+          <Plus className="w-5 h-5" /> Service vehicle
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AddServiceTicket({ onAdd, onCancel }) {
+  const [f, setF] = useState({
+    warranty: false, customerName: "", customerContact: "",
+    year: "", make: "", model: "",
+    complaint: "", failure: "", recommendedWork: "",
+    estCost: "", estLaborHours: "",
+  });
+  const [saving, setSaving] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const ok = f.customerName && f.year && f.make && f.model && f.complaint;
+
+  return (
+    <div className="mb-4 bg-white rounded-xl border-2 border-sky-300 p-4 space-y-3 shadow-sm">
+      <p className="text-xs font-bold text-sky-700 -mb-1">New service vehicle</p>
+      <label className="flex items-center gap-2.5 cursor-pointer">
+        <input type="checkbox" checked={f.warranty} onChange={(e) => setF({ ...f, warranty: e.target.checked })} className="w-4 h-4 accent-sky-600" />
+        <span className="text-sm font-semibold text-slate-700">Warranty job</span>
+      </label>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Customer name" value={f.customerName} onChange={set("customerName")} placeholder="Jane Smith" />
+        <Field label="Customer contact" value={f.customerContact} onChange={set("customerContact")} placeholder="Phone or email" />
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Year" value={f.year} onChange={set("year")} inputMode="numeric" placeholder="2019" />
+        <Field label="Make" value={f.make} onChange={set("make")} placeholder="Chevy" />
+        <Field label="Model" value={f.model} onChange={set("model")} placeholder="Malibu" />
+      </div>
+      <div>
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Customer complaint</label>
+        <textarea value={f.complaint} onChange={set("complaint")} rows={2} placeholder="What the customer says is wrong…" className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-sm focus:outline-none focus:border-sky-500" />
+      </div>
+      <div>
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Failure (tech diagnosis)</label>
+        <textarea value={f.failure} onChange={set("failure")} rows={2} placeholder="What's actually wrong…" className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-sm focus:outline-none focus:border-sky-500" />
+      </div>
+      <div>
+        <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Recommended work</label>
+        <textarea value={f.recommendedWork} onChange={set("recommendedWork")} rows={2} placeholder="What the tech recommends doing…" className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-sm focus:outline-none focus:border-sky-500" />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Est. cost $" value={f.estCost} onChange={set("estCost")} inputMode="decimal" placeholder="450" />
+        <Field label="Est. labor hours" value={f.estLaborHours} onChange={set("estLaborHours")} inputMode="decimal" placeholder="2" />
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <button
+          disabled={!ok || saving}
+          onClick={() => { if (saving || !ok) return; setSaving(true); onAdd(f); }}
+          className="py-2.5 rounded-lg text-white text-sm font-bold disabled:opacity-40"
+          style={{ background: "#0D2440" }}
+        >
+          {saving ? "Adding…" : "Add service vehicle"}
+        </button>
+        <button onClick={onCancel} className="py-2.5 rounded-lg bg-white border border-slate-300 text-slate-600 text-sm font-bold">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ServiceTicketCard({ t, me, onUpdate, onDelete, compact }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const status = ticketStatus(t);
+  const [label, badgeCls] = TICKET_STATUS_LABEL[status];
+
+  if (compact) {
+    return (
+      <div className="p-3 rounded-lg border border-slate-200 bg-white flex items-center justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-slate-700 truncate">{t.customerName} · {t.year} {t.make} {t.model}</p>
+          <p className="text-[11px] text-slate-400 truncate">{t.complaint}</p>
+        </div>
+        <span className={`shrink-0 text-[10px] font-bold px-2 py-1 rounded-md ${badgeCls}`}>{label}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="font-display font-bold text-slate-800">{t.customerName} {t.warranty && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 align-middle">WARRANTY</span>}</p>
+          <p className="text-xs text-slate-400">{t.customerContact}</p>
+          <p className="text-sm font-semibold text-slate-700 mt-1">{t.year} {t.make} {t.model}</p>
+        </div>
+        <span className={`shrink-0 text-[10px] font-bold px-2 py-1 rounded-md ${badgeCls}`}>{label}</span>
+      </div>
+
+      <div className="mt-3 space-y-2 text-xs">
+        <div><span className="font-bold text-slate-500 uppercase tracking-wide text-[10px]">Complaint</span><p className="text-slate-700">{t.complaint}</p></div>
+        {t.failure && <div><span className="font-bold text-slate-500 uppercase tracking-wide text-[10px]">Failure</span><p className="text-slate-700">{t.failure}</p></div>}
+        {t.recommendedWork && <div><span className="font-bold text-slate-500 uppercase tracking-wide text-[10px]">Recommended work</span><p className="text-slate-700">{t.recommendedWork}</p></div>}
+      </div>
+
+      <div className="mt-2 flex items-center gap-3 text-xs text-slate-500">
+        {t.estCost && <span>Est. <span className="font-bold text-slate-700">{money(t.estCost)}</span></span>}
+        {t.estLaborHours && <span>{t.estLaborHours}h labor</span>}
+      </div>
+
+      {t.sched && (
+        <p className="mt-2 text-xs font-bold text-sky-700">
+          Scheduled: {t.sched.tech} · {t.sched.date} · {fmtHour(t.sched.start)}–{fmtHour(t.sched.start + t.sched.hours)}
+        </p>
+      )}
+      {t.customerApproved && (
+        <p className="mt-1 text-[11px] text-emerald-600 font-semibold">Customer approved · {t.approvedBy} · {new Date(t.approvedTs).toLocaleDateString()}</p>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {status === "new" && (
+          <button
+            onClick={() => onUpdate(t.id, { alldataBuilt: true }, `${me} built the AllData ticket for ${t.customerName}'s ${t.make} ${t.model} — awaiting customer approval`)}
+            className="px-3 py-2 rounded-lg text-white text-xs font-bold"
+            style={{ background: "#0D2440" }}
+          >
+            Mark ticket built in AllData
+          </button>
+        )}
+        {status === "awaiting_approval" && (
+          <button
+            onClick={() => onUpdate(t.id, { customerApproved: true, approvedBy: me, approvedTs: Date.now() }, `${me} got customer approval for ${t.customerName}'s ${t.make} ${t.model}`)}
+            className="px-3 py-2 rounded-lg text-white text-xs font-bold"
+            style={{ background: "#10B981" }}
+          >
+            Customer approved
+          </button>
+        )}
+        {status === "approved" && (
+          <span className="text-xs font-semibold text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+            Ready — go to Schedule to place the labor
+          </span>
+        )}
+        {(status === "approved" || status === "scheduled") && !t.complete && (
+          <button
+            onClick={() => onUpdate(t.id, { complete: true }, `${me} marked ${t.customerName}'s ${t.make} ${t.model} complete`)}
+            className="px-3 py-2 rounded-lg border border-emerald-300 text-emerald-700 text-xs font-bold"
+          >
+            Mark complete
+          </button>
+        )}
+      </div>
+
+      {confirmDelete ? (
+        <div className="mt-2 p-2.5 rounded-lg border border-red-300 bg-red-50">
+          <p className="text-xs font-semibold text-red-700 mb-2">Delete this service ticket? This can't be undone.</p>
+          <div className="grid grid-cols-2 gap-2">
+            <button onClick={() => onDelete(t.id)} className="py-2 rounded-lg bg-red-600 text-white text-xs font-bold">Yes, delete it</button>
+            <button onClick={() => setConfirmDelete(false)} className="py-2 rounded-lg bg-white border border-slate-300 text-slate-600 text-xs font-bold">Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button onClick={() => setConfirmDelete(true)} className="mt-2 text-[11px] font-bold text-red-500 flex items-center gap-1">
+          <Trash2 className="w-3 h-3" /> Delete
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -2690,10 +2960,19 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
 
   const vehicles = data?.vehicles || [];
 
-  // all approved recon jobs across the lot, plus misc (non-recon) service jobs — v is null for misc jobs
+  // all approved recon jobs across the lot, plus misc (non-recon) jobs, plus
+  // customer-approved service tickets — v is null for misc jobs; service
+  // tickets get a synthetic v (year/make/model, no stock) purely for display
   const jobs = [];
   vehicles.forEach((v) => (v.lines || []).forEach((l) => { if (l.status === "approved" && !l.quick) jobs.push({ v, l }); }));
   (data?.miscJobs || []).forEach((l) => jobs.push({ v: null, l }));
+  (data?.serviceTickets || []).forEach((t) => {
+    if (!t.customerApproved || t.complete) return;
+    jobs.push({
+      v: { id: t.id, year: t.year, make: t.make, model: t.model, stock: null },
+      l: { id: t.id, desc: t.recommendedWork || t.complaint, estLaborHours: t.estLaborHours, estCost: t.estCost, sched: t.sched, isService: true },
+    });
+  });
   const unscheduled = jobs.filter(({ l }) => !l.sched);
   const todays = jobs.filter(({ l }) => l.sched && l.sched.date === day);
 
@@ -2731,10 +3010,17 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
     await mutate((d) => {
       if (picked.vId) {
         const vv = d.vehicles.find((x) => x.id === picked.vId);
-        const l = vv?.lines?.find((x) => x.id === picked.lineId);
-        if (!l) return d;
-        l.sched = { tech, date: day, start, hours: hrs };
-        notify(d, `${me} scheduled "${l.desc}" (#${vv.stock}) for ${tech} — ${dayLabel}, ${fmtHour(start)}–${fmtHour(start + hrs)}`, vv.id, "stage");
+        if (vv) {
+          const l = vv.lines?.find((x) => x.id === picked.lineId);
+          if (!l) return d;
+          l.sched = { tech, date: day, start, hours: hrs };
+          notify(d, `${me} scheduled "${l.desc}" (#${vv.stock}) for ${tech} — ${dayLabel}, ${fmtHour(start)}–${fmtHour(start + hrs)}`, vv.id, "stage");
+        } else {
+          const t = (d.serviceTickets || []).find((x) => x.id === picked.vId);
+          if (!t) return d;
+          t.sched = { tech, date: day, start, hours: hrs };
+          notify(d, `${me} scheduled ${t.customerName}'s ${t.make} ${t.model} for ${tech} — ${dayLabel}, ${fmtHour(start)}–${fmtHour(start + hrs)}`, null, "stage");
+        }
       } else {
         const l = (d.miscJobs || []).find((x) => x.id === picked.lineId);
         if (!l) return d;
@@ -2751,10 +3037,17 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
     await mutate((d) => {
       if (vId) {
         const vv = d.vehicles.find((x) => x.id === vId);
-        const l = vv?.lines?.find((x) => x.id === lineId);
-        if (!l || !l.sched) return d;
-        notify(d, `${me} removed "${l.desc}" (#${vv.stock}) from ${l.sched.tech}'s schedule`, vv.id, "info");
-        delete l.sched;
+        if (vv) {
+          const l = vv.lines?.find((x) => x.id === lineId);
+          if (!l || !l.sched) return d;
+          notify(d, `${me} removed "${l.desc}" (#${vv.stock}) from ${l.sched.tech}'s schedule`, vv.id, "info");
+          delete l.sched;
+        } else {
+          const t = (d.serviceTickets || []).find((x) => x.id === vId);
+          if (!t || !t.sched) return d;
+          notify(d, `${me} removed ${t.customerName}'s ${t.make} ${t.model} from ${t.sched.tech}'s schedule`, null, "info");
+          delete t.sched;
+        }
       } else {
         const l = (d.miscJobs || []).find((x) => x.id === lineId);
         if (!l || !l.sched) return d;
@@ -2770,11 +3063,17 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
     await mutate((d) => {
       if (vId) {
         const vv = d.vehicles.find((x) => x.id === vId);
-        if (!vv) return d;
-        const l = vv.lines?.find((x) => x.id === lineId);
-        if (!l) return d;
-        vv.lines = vv.lines.filter((x) => x.id !== lineId);
-        notify(d, `${me} deleted "${l.desc}" (#${vv.stock}) from the schedule`, vId, "info");
+        if (vv) {
+          const l = vv.lines?.find((x) => x.id === lineId);
+          if (!l) return d;
+          vv.lines = vv.lines.filter((x) => x.id !== lineId);
+          notify(d, `${me} deleted "${l.desc}" (#${vv.stock}) from the schedule`, vId, "info");
+        } else {
+          const t = (d.serviceTickets || []).find((x) => x.id === vId);
+          if (!t) return d;
+          d.serviceTickets = (d.serviceTickets || []).filter((x) => x.id !== vId);
+          notify(d, `${me} deleted the service ticket for ${t.customerName}'s ${t.make} ${t.model} from the schedule`, null, "info");
+        }
       } else {
         const l = (d.miscJobs || []).find((x) => x.id === lineId);
         if (!l) return d;
@@ -2800,7 +3099,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
       const l = vId
         ? d.vehicles.find((x) => x.id === vId)?.lines?.find((x) => x.id === lineId)
         : (d.miscJobs || []).find((x) => x.id === lineId);
-      if (!l) return d;
+      if (!l) return d; // service tickets don't support a custom label — nothing to write back to
       l.jobLabel = label;
       return d;
     });
@@ -2897,15 +3196,17 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                     </div>
                   ) : (
                     <div className="flex border-t border-slate-100 bg-slate-50">
-                      <button
-                        onClick={() => { setEditingLabel(l.id); setLabelDraft(l.jobLabel || ""); }}
-                        className="flex-1 text-left px-2.5 py-1 text-[10px] font-bold text-sky-600 flex items-center gap-1"
-                      >
-                        <Pencil className="w-3 h-3" /> {l.jobLabel ? "Rename job" : "Give this job a clearer name"}
-                      </button>
+                      {!l.isService && (
+                        <button
+                          onClick={() => { setEditingLabel(l.id); setLabelDraft(l.jobLabel || ""); }}
+                          className="flex-1 text-left px-2.5 py-1 text-[10px] font-bold text-sky-600 flex items-center gap-1"
+                        >
+                          <Pencil className="w-3 h-3" /> {l.jobLabel ? "Rename job" : "Give this job a clearer name"}
+                        </button>
+                      )}
                       <button
                         onClick={() => setConfirmDeleteJob(l.id)}
-                        className="shrink-0 px-2.5 py-1 text-[10px] font-bold text-red-500 flex items-center gap-1 border-l border-slate-200"
+                        className={`px-2.5 py-1 text-[10px] font-bold text-red-500 flex items-center gap-1 ${l.isService ? "flex-1" : "shrink-0 border-l border-slate-200"}`}
                       >
                         <Trash2 className="w-3 h-3" /> Delete
                       </button>
@@ -2961,7 +3262,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                         ) : (
                           <>
                             {job.v && <p className="text-[9px] text-sky-300 leading-tight truncate">{vehicleLabel(job.v)}</p>}
-                            {job.v ? (
+                            {job.v && !job.l.isService ? (
                               <button onClick={() => onOpen(job.v.id)} className="block w-full text-left text-[10px] font-bold leading-tight truncate">
                                 {jobTitle(job.l)}
                               </button>
@@ -2969,7 +3270,10 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                               <p className="text-[10px] font-bold leading-tight truncate">{jobTitle(job.l)}</p>
                             )}
                             <div className="flex items-center justify-between">
-                              <span className="text-[9px] text-sky-300">{job.l.sched.hours}h{job.v ? ` · ${money(lineEst(job.l))} est` : ""}</span>
+                              <span className="text-[9px] text-sky-300">
+                                {job.l.sched.hours}h
+                                {job.l.isService ? (job.l.estCost ? ` · ${money(job.l.estCost)} est` : "") : job.v ? ` · ${money(lineEst(job.l))} est` : ""}
+                              </span>
                               <span className="flex items-center gap-1.5 shrink-0">
                                 <button onClick={() => unschedule(job.v ? job.v.id : null, job.l.id)} className="text-[9px] font-bold text-red-300 underline">remove</button>
                                 <button onClick={() => setConfirmDeleteJob(job.l.id)} className="text-[9px] font-bold text-red-300 underline">delete</button>

@@ -19,10 +19,11 @@ import {
   generalLogToFields, fieldsToGeneralLog,
   estEditToFields, fieldsToEstEdit,
   activityToFields, fieldsToActivity,
+  ticketToFields, fieldsToTicket,
 } from './schema.js';
 
 const LOCAL_FALLBACK_KEY = 'freebird-recon-airtable-fallback-v1';
-const emptyDataShape = () => ({ vehicles: [], notifications: [], miscJobs: [], laborRate: 100 });
+const emptyDataShape = () => ({ vehicles: [], notifications: [], miscJobs: [], serviceTickets: [], laborRate: 100 });
 const clone = (obj) => JSON.parse(JSON.stringify(obj));
 
 export let storageMode = 'memory';
@@ -35,18 +36,20 @@ const recIds = {
   logs: new Map(),
   edits: new Map(),
   activity: new Map(),
+  tickets: new Map(),
 };
 
 /* ---------- load & assemble ---------- */
 
 async function loadAll() {
-  const [vehicleRecs, lineRecs, logRecs, editRecs, activityRecs, settingsRecs] = await Promise.all([
+  const [vehicleRecs, lineRecs, logRecs, editRecs, activityRecs, settingsRecs, ticketRecs] = await Promise.all([
     listAll(TABLES.vehicles),
     listAll(TABLES.lines),
     listAll(TABLES.laborLogs),
     listAll(TABLES.estEdits),
     listAll(TABLES.activity, { 'sort[0][field]': 'Ts', 'sort[0][direction]': 'desc', maxRecords: 200 }),
     listAll(TABLES.settings),
+    listAll(TABLES.serviceTickets),
   ]);
 
   recIds.vehicles = new Map();
@@ -54,6 +57,7 @@ async function loadAll() {
   recIds.logs = new Map();
   recIds.edits = new Map();
   recIds.activity = new Map();
+  recIds.tickets = new Map();
 
   const vehiclesById = new Map();
   const vehicleRecIdToAppId = new Map();
@@ -136,6 +140,14 @@ async function loadAll() {
     if (rate != null) laborRate = rate;
   }
 
+  const serviceTickets = [];
+  ticketRecs.forEach((rec) => {
+    const t = fieldsToTicket(rec);
+    if (!t.id) return;
+    recIds.tickets.set(t.id, rec.id);
+    serviceTickets.push(t);
+  });
+
   const vehicles = [...vehiclesById.values()].sort((a, b) => (b.addedTs || 0) - (a.addedTs || 0));
   vehicles.forEach((v) => {
     v.lines.sort((a, b) => (a.ts || 0) - (b.ts || 0));
@@ -147,8 +159,9 @@ async function loadAll() {
   });
   notifications.sort((a, b) => (b.ts || 0) - (a.ts || 0));
   miscJobs.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+  serviceTickets.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 
-  const data = { vehicles, notifications, miscJobs, laborRate };
+  const data = { vehicles, notifications, miscJobs, serviceTickets, laborRate };
   lastSynced = clone(data);
   return data;
 }
@@ -286,6 +299,9 @@ async function persistToAirtable(nextData) {
       settingsRecordId = created[0]?.id || null;
     }
   }
+
+  // Service tickets (non-recon customer vehicles) — a flat table, no parent to link to.
+  await syncEntity(TABLES.serviceTickets, recIds.tickets, prev.serviceTickets || [], nextData.serviceTickets || [], ticketToFields);
 
   lastSynced = clone(nextData);
 }
