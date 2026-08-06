@@ -24,6 +24,11 @@ const TEAM = ["Chelsa", "Jerry", "Mark", "Dan", "Kansas"];
 // non-job reasons a tech can clock in under, available from the moment a vehicle is checked in
 const GENERAL_REASONS = ["Inspection", "Parts pricing & ordering", "Detail", "Other"];
 
+// services farmed out to an outside vendor rather than done in-house — no shop
+// labor involved, just a cost estimate; the line otherwise flows through
+// approval and parts tracking exactly like a normal repair line
+const VENDOR_SERVICES = ["Windshield", "Locksmith", "Wheel alignment"];
+
 const CHECKLIST = [
   {
     section: "Road Test",
@@ -1718,6 +1723,8 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
   const [results, setResults] = useState({});
   const [fails, setFails] = useState({}); // key -> {note, estParts, estLaborHours, estLaborRate}
   const [generalNotes, setGeneralNotes] = useState("");
+  const [vendorItems, setVendorItems] = useState({}); // service -> {needed, note, estCost}
+  const [otherVendor, setOtherVendor] = useState({ needed: false, desc: "", note: "", estCost: "" });
   const [submitting, setSubmitting] = useState(false);
 
   if (!v) return null;
@@ -1729,11 +1736,13 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
     if (status === "fail" && !fails[key]) setFails({ ...fails, [key]: { note: "", estParts: "", estLaborHours: "", estLaborRate: "" } });
   };
   const setFail = (key, field, val) => setFails({ ...fails, [key]: { ...fails[key], [field]: val } });
+  const setVendor = (service, field, val) => setVendorItems({ ...vendorItems, [service]: { ...vendorItems[service], [field]: val } });
+  const toggleVendor = (service) => setVendor(service, "needed", !vendorItems[service]?.needed);
 
   const submit = () => {
     if (submitting) return;
     setSubmitting(true);
-    const lines = Object.entries(results)
+    const checklistLines = Object.entries(results)
       .filter(([, r]) => r.status === "fail")
       .map(([key]) => {
         const f = fails[key] || {};
@@ -1744,7 +1753,21 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
           status: "pending", addedBy: me, ts: Date.now(), source: "inspection",
         };
       });
-    onSubmit(results, lines, generalNotes);
+    const vendorLines = VENDOR_SERVICES.filter((s) => vendorItems[s]?.needed).map((s) => ({
+      id: uid(), desc: `${s} (outside vendor)`, note: vendorItems[s]?.note || "",
+      estParts: vendorItems[s]?.estCost || "", estLaborHours: "", estLaborRate: "",
+      actualParts: "", actualLabor: "",
+      status: "pending", addedBy: me, ts: Date.now(), source: "vendor",
+    }));
+    if (otherVendor.needed && otherVendor.desc.trim()) {
+      vendorLines.push({
+        id: uid(), desc: `${otherVendor.desc.trim()} (outside vendor)`, note: otherVendor.note || "",
+        estParts: otherVendor.estCost || "", estLaborHours: "", estLaborRate: "",
+        actualParts: "", actualLabor: "",
+        status: "pending", addedBy: me, ts: Date.now(), source: "vendor",
+      });
+    }
+    onSubmit(results, [...checklistLines, ...vendorLines], generalNotes);
   };
 
   return (
@@ -1820,6 +1843,82 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
         </div>
       ))}
 
+      {/* outside vendor services — no shop labor, just cost + approval */}
+      <div className="mb-4">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-[11px] font-display font-bold uppercase tracking-widest text-slate-400">Outside vendor services</span>
+          <div className="flex-1 h-px bg-slate-200" />
+        </div>
+        <p className="text-xs text-slate-500 mb-2">Anything outside the shop — windshield, locksmith, alignment, etc.</p>
+        <div className="bg-white rounded-xl border border-slate-200 divide-y divide-slate-100 shadow-sm">
+          {VENDOR_SERVICES.map((service) => {
+            const needed = !!vendorItems[service]?.needed;
+            return (
+              <div key={service} className="p-3">
+                <label className="flex items-center gap-2.5 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={needed}
+                    onChange={() => toggleVendor(service)}
+                    className="w-4 h-4 accent-sky-600"
+                  />
+                  <span className="text-sm text-slate-700 flex-1">{service}</span>
+                </label>
+                {needed && (
+                  <div className="mt-2 p-2.5 rounded-lg bg-sky-50 border border-sky-100 space-y-2">
+                    <input
+                      value={vendorItems[service]?.note || ""}
+                      onChange={(e) => setVendor(service, "note", e.target.value)}
+                      placeholder="Details (e.g., chip crack driver side, vendor to use…)"
+                      className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-xs"
+                    />
+                    <input
+                      value={vendorItems[service]?.estCost || ""}
+                      onChange={(e) => setVendor(service, "estCost", e.target.value)}
+                      placeholder="Est. cost $" inputMode="decimal"
+                      className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-xs"
+                    />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <div className="p-3">
+            <label className="flex items-center gap-2.5 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={otherVendor.needed}
+                onChange={(e) => setOtherVendor({ ...otherVendor, needed: e.target.checked })}
+                className="w-4 h-4 accent-sky-600"
+              />
+              <span className="text-sm text-slate-700 flex-1">Other</span>
+            </label>
+            {otherVendor.needed && (
+              <div className="mt-2 p-2.5 rounded-lg bg-sky-50 border border-sky-100 space-y-2">
+                <input
+                  value={otherVendor.desc}
+                  onChange={(e) => setOtherVendor({ ...otherVendor, desc: e.target.value })}
+                  placeholder="What's the service?"
+                  className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-xs"
+                />
+                <input
+                  value={otherVendor.note}
+                  onChange={(e) => setOtherVendor({ ...otherVendor, note: e.target.value })}
+                  placeholder="Details"
+                  className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-xs"
+                />
+                <input
+                  value={otherVendor.estCost}
+                  onChange={(e) => setOtherVendor({ ...otherVendor, estCost: e.target.value })}
+                  placeholder="Est. cost $" inputMode="decimal"
+                  className="w-full rounded border border-sky-200 bg-white px-2 py-1.5 text-xs"
+                />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="fixed bottom-0 left-0 right-0 z-30">
         <div className="max-w-3xl mx-auto p-3 bg-white border-t border-slate-200 flex items-center gap-3">
           <div className="text-xs text-slate-500 flex-1">
@@ -1827,7 +1926,7 @@ function Inspection({ data, id, me, onSubmit, onCancel }) {
             <span className="text-red-600 font-semibold">{Object.values(results).filter((r) => r.status === "fail").length} fails</span>
           </div>
           <button
-            disabled={answered === 0 || submitting}
+            disabled={(answered === 0 && !VENDOR_SERVICES.some((s) => vendorItems[s]?.needed) && !(otherVendor.needed && otherVendor.desc.trim())) || submitting}
             onClick={submit}
             className="px-6 py-3 rounded-xl text-white font-display font-bold disabled:opacity-40"
             style={{ background: "#0D2440" }}
@@ -2515,6 +2614,7 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
   const [showAddMisc, setShowAddMisc] = useState(false);
   const [editingLabel, setEditingLabel] = useState(null); // lineId whose custom label is being edited
   const [labelDraft, setLabelDraft] = useState("");
+  const [confirmDeleteJob, setConfirmDeleteJob] = useState(null); // lineId awaiting delete confirmation
 
   const vehicles = data?.vehicles || [];
 
@@ -2591,6 +2691,27 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
       }
       return d;
     });
+  };
+
+  // fully deletes the job (not just unscheduling it) — for duplicates, mistakes, cancelled work, etc.
+  const deleteJob = async (vId, lineId) => {
+    await mutate((d) => {
+      if (vId) {
+        const vv = d.vehicles.find((x) => x.id === vId);
+        if (!vv) return d;
+        const l = vv.lines?.find((x) => x.id === lineId);
+        if (!l) return d;
+        vv.lines = vv.lines.filter((x) => x.id !== lineId);
+        notify(d, `${me} deleted "${l.desc}" (#${vv.stock}) from the schedule`, vId, "info");
+      } else {
+        const l = (d.miscJobs || []).find((x) => x.id === lineId);
+        if (!l) return d;
+        d.miscJobs = (d.miscJobs || []).filter((x) => x.id !== lineId);
+        notify(d, `${me} deleted misc job "${l.desc}"`, null, "info");
+      }
+      return d;
+    });
+    setConfirmDeleteJob(null);
   };
 
   const addMiscJob = async (desc, hours) => {
@@ -2694,13 +2815,29 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                         Cancel
                       </button>
                     </div>
+                  ) : confirmDeleteJob === l.id ? (
+                    <div className="p-2 border-t border-red-200 bg-red-50 flex items-center justify-between gap-2">
+                      <span className="text-[11px] font-semibold text-red-700">Delete this job entirely?</span>
+                      <div className="flex gap-1.5 shrink-0">
+                        <button onClick={() => deleteJob(vId, l.id)} className="px-2.5 py-1 rounded bg-red-600 text-white text-[11px] font-bold">Yes, delete</button>
+                        <button onClick={() => setConfirmDeleteJob(null)} className="px-2.5 py-1 rounded border border-slate-300 text-slate-600 text-[11px] font-bold">Cancel</button>
+                      </div>
+                    </div>
                   ) : (
-                    <button
-                      onClick={() => { setEditingLabel(l.id); setLabelDraft(l.jobLabel || ""); }}
-                      className="w-full text-left px-2.5 py-1 border-t border-slate-100 bg-slate-50 text-[10px] font-bold text-sky-600 flex items-center gap-1"
-                    >
-                      <Pencil className="w-3 h-3" /> {l.jobLabel ? "Rename job" : "Give this job a clearer name"}
-                    </button>
+                    <div className="flex border-t border-slate-100 bg-slate-50">
+                      <button
+                        onClick={() => { setEditingLabel(l.id); setLabelDraft(l.jobLabel || ""); }}
+                        className="flex-1 text-left px-2.5 py-1 text-[10px] font-bold text-sky-600 flex items-center gap-1"
+                      >
+                        <Pencil className="w-3 h-3" /> {l.jobLabel ? "Rename job" : "Give this job a clearer name"}
+                      </button>
+                      <button
+                        onClick={() => setConfirmDeleteJob(l.id)}
+                        className="shrink-0 px-2.5 py-1 text-[10px] font-bold text-red-500 flex items-center gap-1 border-l border-slate-200"
+                      >
+                        <Trash2 className="w-3 h-3" /> Delete
+                      </button>
+                    </div>
                   )}
                 </div>
               );
@@ -2741,18 +2878,33 @@ function SchedulePage({ data, me, mutate, notify, onOpen }) {
                   <div key={t} className="border-b border-l border-slate-100 px-1 py-0.5" style={{ background: "rgba(59,140,222,0.10)" }}>
                     {isStart && (
                       <div className="rounded-md px-1.5 py-1 text-white" style={{ background: "#0D2440" }}>
-                        {job.v && <p className="text-[9px] text-sky-300 leading-tight truncate">{vehicleLabel(job.v)}</p>}
-                        {job.v ? (
-                          <button onClick={() => onOpen(job.v.id)} className="block w-full text-left text-[10px] font-bold leading-tight truncate">
-                            {jobTitle(job.l)}
-                          </button>
+                        {confirmDeleteJob === job.l.id ? (
+                          <div>
+                            <p className="text-[9px] font-bold text-red-300 leading-tight">Delete entirely?</p>
+                            <div className="flex items-center gap-2 mt-0.5">
+                              <button onClick={() => deleteJob(job.v ? job.v.id : null, job.l.id)} className="text-[9px] font-bold text-white underline">Yes, delete</button>
+                              <button onClick={() => setConfirmDeleteJob(null)} className="text-[9px] font-bold text-sky-300 underline">cancel</button>
+                            </div>
+                          </div>
                         ) : (
-                          <p className="text-[10px] font-bold leading-tight truncate">{jobTitle(job.l)}</p>
+                          <>
+                            {job.v && <p className="text-[9px] text-sky-300 leading-tight truncate">{vehicleLabel(job.v)}</p>}
+                            {job.v ? (
+                              <button onClick={() => onOpen(job.v.id)} className="block w-full text-left text-[10px] font-bold leading-tight truncate">
+                                {jobTitle(job.l)}
+                              </button>
+                            ) : (
+                              <p className="text-[10px] font-bold leading-tight truncate">{jobTitle(job.l)}</p>
+                            )}
+                            <div className="flex items-center justify-between">
+                              <span className="text-[9px] text-sky-300">{job.l.sched.hours}h{job.v ? ` · ${money(lineEst(job.l))} est` : ""}</span>
+                              <span className="flex items-center gap-1.5 shrink-0">
+                                <button onClick={() => unschedule(job.v ? job.v.id : null, job.l.id)} className="text-[9px] font-bold text-red-300 underline">remove</button>
+                                <button onClick={() => setConfirmDeleteJob(job.l.id)} className="text-[9px] font-bold text-red-300 underline">delete</button>
+                              </span>
+                            </div>
+                          </>
                         )}
-                        <div className="flex items-center justify-between">
-                          <span className="text-[9px] text-sky-300">{job.l.sched.hours}h{job.v ? ` · ${money(lineEst(job.l))} est` : ""}</span>
-                          <button onClick={() => unschedule(job.v ? job.v.id : null, job.l.id)} className="text-[9px] font-bold text-red-300 underline">remove</button>
-                        </div>
                       </div>
                     )}
                   </div>
