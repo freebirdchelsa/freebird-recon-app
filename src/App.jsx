@@ -689,6 +689,7 @@ function EditVehicle({ v, others, onSave, onCancel }) {
     year: v.year || "", make: v.make || "", model: v.model || "",
     stock: v.stock || "", vin: v.vin || "", miles: v.miles || "",
     buyPrice: v.buyPrice || "", notes: v.notes || "",
+    arrivalDate: new Date(v.addedTs || Date.now()).toISOString().slice(0, 10),
   });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const dupe = f.stock.trim() && others.some((x) => (x.stock || "").trim().toLowerCase() === f.stock.trim().toLowerCase());
@@ -707,7 +708,19 @@ function EditVehicle({ v, others, onSave, onCancel }) {
         <Field label="Miles" value={f.miles} onChange={set("miles")} inputMode="numeric" />
       </div>
       <Field label="VIN" value={f.vin} onChange={set("vin")} />
-      <Field label="Purchase price" value={f.buyPrice} onChange={set("buyPrice")} inputMode="decimal" />
+      <div className="grid grid-cols-2 gap-2">
+        <Field label="Purchase price" value={f.buyPrice} onChange={set("buyPrice")} inputMode="decimal" />
+        <div>
+          <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Actual arrival date</label>
+          <input
+            type="date"
+            value={f.arrivalDate}
+            onChange={set("arrivalDate")}
+            className="mt-1 w-full rounded-lg border border-slate-300 p-2.5 text-sm focus:outline-none focus:border-sky-500"
+          />
+        </div>
+      </div>
+      <p className="text-[11px] text-slate-400 -mt-2">Fixes "days in recon" if it was checked in a few days after it actually showed up.</p>
       <div>
         <label className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">Intake notes</label>
         <textarea
@@ -723,7 +736,15 @@ function EditVehicle({ v, others, onSave, onCancel }) {
         </p>
       )}
       <div className="grid grid-cols-2 gap-2">
-        <button disabled={!ok} onClick={() => onSave(f)} className="py-2.5 rounded-lg text-white text-sm font-bold disabled:opacity-40" style={{ background: "#0D2440" }}>
+        <button
+          disabled={!ok}
+          onClick={() => {
+            const { arrivalDate, ...rest } = f;
+            onSave({ ...rest, addedTs: new Date(arrivalDate + "T12:00").getTime() });
+          }}
+          className="py-2.5 rounded-lg text-white text-sm font-bold disabled:opacity-40"
+          style={{ background: "#0D2440" }}
+        >
           Save corrections
         </button>
         <button onClick={onCancel} className="py-2.5 rounded-lg bg-white border border-slate-300 text-slate-600 text-sm font-bold">
